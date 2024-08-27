@@ -42,6 +42,28 @@ impl Aggregator {
         Self { client }
     }
 
+    // Fetch the start time (Unix timestamp) of the current epoch
+    async fn get_epoch_start_time(&self) -> Result<i64, AggregatorError> {
+        let epoch_info = self
+            .client
+            .get_epoch_info()
+            .map_err(AggregatorError::FetchTransactionError)?;
+
+        // Get the block production rate to estimate time per slot
+        let block_production_time_per_slot = 0.4; // Approx. 0.4 seconds per slot on Solana
+
+        // Calculate the start slot and its timestamp
+        let slots_since_epoch_start = epoch_info.slot_index;
+        let seconds_since_epoch_start =
+            (slots_since_epoch_start as f64 * block_production_time_per_slot) as i64;
+        let current_time = self
+            .client
+            .get_block_time(epoch_info.absolute_slot)
+            .map_err(AggregatorError::FetchTransactionError)?;
+
+        Ok(current_time - seconds_since_epoch_start)
+    }
+
     pub async fn fetch_recent_transactions(
         &self,
         address: &str,
@@ -50,7 +72,9 @@ impl Aggregator {
 
         info!("Starting transaction fetch for address: {}", address);
 
-        // Wrap fetching logic with a timeout
+        // Fetch the start time of the current epoch
+        let epoch_start_time = self.get_epoch_start_time().await?;
+
         let result = timeout(timeout_duration, async {
             let pubkey: Pubkey = address
                 .parse()
@@ -89,51 +113,60 @@ impl Aggregator {
                             signature_info.signature
                         );
 
-                        let timestamp = transaction_with_meta.block_time.unwrap_or(0);
-                        match &transaction_with_meta.transaction.transaction {
-                            EncodedTransaction::Json(transaction) => {
-                                let UiTransaction { message, .. } = transaction;
-                                let (sender, receiver) = match message {
-                                    UiMessage::Parsed(parsed_message) => {
-                                        let sender = parsed_message
-                                            .account_keys
-                                            .get(0)
-                                            .map_or("unknown".to_string(), |acc| {
-                                                acc.pubkey.clone()
-                                            });
-                                        let receiver = parsed_message
-                                            .account_keys
-                                            .get(1)
-                                            .map_or("unknown".to_string(), |acc| {
-                                                acc.pubkey.clone()
-                                            });
-                                        (sender, receiver)
-                                    }
-                                    UiMessage::Raw(raw_message) => {
-                                        let sender = raw_message
-                                            .account_keys
-                                            .get(0)
-                                            .map_or("unknown".to_string(), |key| key.clone());
-                                        let receiver = raw_message
-                                            .account_keys
-                                            .get(1)
-                                            .map_or("unknown".to_string(), |key| key.clone());
-                                        (sender, receiver)
-                                    }
-                                };
-                                let amount = meta.post_balances[1] - meta.pre_balances[1];
+                        // Use block_time to filter transactions by the current epoch
+                        if let Some(block_time) = transaction_with_meta.block_time {
+                            if block_time >= epoch_start_time {
+                                let timestamp = block_time;
+                                match &transaction_with_meta.transaction.transaction {
+                                    EncodedTransaction::Json(transaction) => {
+                                        let UiTransaction { message, .. } = transaction;
+                                        let (sender, receiver) = match message {
+                                            UiMessage::Parsed(parsed_message) => {
+                                                let sender = parsed_message
+                                                    .account_keys
+                                                    .get(0)
+                                                    .map_or("unknown".to_string(), |acc| {
+                                                        acc.pubkey.clone()
+                                                    });
+                                                let receiver = parsed_message
+                                                    .account_keys
+                                                    .get(1)
+                                                    .map_or("unknown".to_string(), |acc| {
+                                                        acc.pubkey.clone()
+                                                    });
+                                                (sender, receiver)
+                                            }
+                                            UiMessage::Raw(raw_message) => {
+                                                let sender = raw_message
+                                                    .account_keys
+                                                    .get(0)
+                                                    .map_or("unknown".to_string(), |key| {
+                                                        key.clone()
+                                                    });
+                                                let receiver = raw_message
+                                                    .account_keys
+                                                    .get(1)
+                                                    .map_or("unknown".to_string(), |key| {
+                                                        key.clone()
+                                                    });
+                                                (sender, receiver)
+                                            }
+                                        };
+                                        let amount = meta.post_balances[1] - meta.pre_balances[1];
 
-                                let transaction_data = TransactionData {
-                                    signature: signature_info.signature.clone(),
-                                    sender,
-                                    receiver,
-                                    amount: amount as u64,
-                                    timestamp: timestamp as u64,
-                                };
+                                        let transaction_data = TransactionData {
+                                            signature: signature_info.signature.clone(),
+                                            sender,
+                                            receiver,
+                                            amount: amount as u64,
+                                            timestamp: timestamp as u64,
+                                        };
 
-                                transactions.push(transaction_data);
+                                        transactions.push(transaction_data);
+                                    }
+                                    _ => {}
+                                }
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -143,7 +176,6 @@ impl Aggregator {
         })
         .await;
 
-        // Handle timeout
         match result {
             Ok(res) => {
                 info!(
