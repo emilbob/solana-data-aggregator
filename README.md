@@ -43,10 +43,13 @@ The Solana Data Aggregator is a tool that helps developers, researchers, and blo
 
 Before you begin, make sure you have the following installed:
 
+Install Rust:
+
 ```
-Rust: Install Rust from rustup.rs.
+rustup
+```
+
 Solana RPC URL: Obtain an RPC URL from a provider like Helius or use the official Solana testnet.
-```
 
 ### Clone the Repository
 
@@ -64,8 +67,9 @@ Create a .env file in the root of the project directory:
 ```
 SOLANA_RPC_URL=https://api.testnet.solana.com
 SOLANA_PUBLIC_KEY=YourPublicKeyHere
-> Replace YourPublicKeyHere with the public key you want to monitor.
 ```
+
+Replace YourPublicKeyHere with the public key you want to monitor.
 
 ### Build the Project
 
@@ -81,8 +85,9 @@ Run the application using the following command:
 
 ```
 cargo run
-The application will start a server at http://127.0.0.1:3030 and begin fetching transactions from the Solana blockchain.
 ```
+
+The application will start a server at `http://127.0.0.1:3030` and begin fetching transactions from the Solana blockchain.
 
 ## Usage
 
@@ -92,19 +97,15 @@ You can query the transactions stored in the database using the API. Refer to th
 
 ### API Endpoints
 
-```
-GET /transactions
-> This endpoint retrieves transactions filtered by public key and optional date.
-```
+`GET /transactions`
+This endpoint retrieves transactions filtered by public key and optional date.
 
 ### Query Parameters:
 
-```
--pub_key: The public key of the sender.
--day (optional): Filter transactions by a specific day in dd/mm/yyyy format.
--limit (optional): Limit the number of transactions returned (default is 5).
--offset (optional): Offset for pagination.
-```
+- pub_key: The public key of the sender.
+- day (optional): Filter transactions by a specific day in dd/mm/yyyy format.
+- limit (optional): Limit the number of transactions returned (default is 5).
+- offset (optional): Offset for pagination.
 
 Example:
 
@@ -131,9 +132,9 @@ The in-memory database stores transaction data during the application's runtime.
 
 The project includes a comprehensive set of unit tests to ensure the correctness of its core components:
 
-Database Tests: Verify that transactions are correctly added, retrieved, and persisted.
-API Tests: Check the functionality and correctness of the API endpoints.
-Aggregator Tests: Test the integration between transaction fetching and storage.
+- Database Tests: Verify that transactions are correctly added, retrieved, and persisted.
+- API Tests: Check the functionality and correctness of the API endpoints.
+- Aggregator Tests: Test the integration between transaction fetching and storage.
 
 To run the tests:
 
