@@ -1,13 +1,14 @@
+use crate::db::{InMemoryDatabase, TransactionData};
 use log::{error, info};
-use serde::Serialize;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::{
     EncodedTransaction, UiMessage, UiTransaction, UiTransactionEncoding,
 };
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::time::{timeout, Duration};
+use tokio::time::{error::Elapsed, timeout, Duration};
 
 #[derive(Debug, Error)]
 pub enum AggregatorError {
@@ -19,27 +20,20 @@ pub enum AggregatorError {
     FetchTransactionError(#[source] solana_client::client_error::ClientError),
     #[error("Failed to parse signature: {0}")]
     ParseSignatureError(String),
-    #[error("Timeout fetching transactions")]
-    Timeout,
-}
 
-#[derive(Debug, Serialize)]
-pub struct TransactionData {
-    pub signature: String,
-    pub sender: String,
-    pub receiver: String,
-    pub amount: u64,
-    pub timestamp: u64,
+    #[error("Operation timed out")]
+    Elapsed(#[from] Elapsed),
 }
 
 pub struct Aggregator {
     client: RpcClient,
+    db: Arc<InMemoryDatabase>,
 }
 
 impl Aggregator {
-    pub fn new(url: &str) -> Self {
+    pub fn new(url: &str, db: Arc<InMemoryDatabase>) -> Self {
         let client = RpcClient::new(url.to_string());
-        Self { client }
+        Self { client, db }
     }
 
     // Fetch the start time (Unix timestamp) of the current epoch
@@ -75,7 +69,7 @@ impl Aggregator {
         // Fetch the start time of the current epoch
         let epoch_start_time = self.get_epoch_start_time().await?;
 
-        let result = timeout(timeout_duration, async {
+        let transactions = timeout(timeout_duration, async {
             let pubkey: Pubkey = address
                 .parse()
                 .map_err(|_| AggregatorError::InvalidPublicKey)?;
@@ -107,16 +101,10 @@ impl Aggregator {
                     .get_transaction(&signature, UiTransactionEncoding::JsonParsed)
                     .map_err(AggregatorError::FetchTransactionError)
                 {
-                    if let Some(meta) = &transaction_with_meta.transaction.meta {
-                        info!(
-                            "Fetched transaction metadata for signature: {}",
-                            signature_info.signature
-                        );
-
-                        // Use block_time to filter transactions by the current epoch
-                        if let Some(block_time) = transaction_with_meta.block_time {
-                            if block_time >= epoch_start_time {
-                                let timestamp = block_time;
+                    if let Some(block_time) = transaction_with_meta.block_time {
+                        if block_time >= epoch_start_time {
+                            let timestamp = block_time;
+                            if let Some(meta) = &transaction_with_meta.transaction.meta {
                                 match &transaction_with_meta.transaction.transaction {
                                     EncodedTransaction::Json(transaction) => {
                                         let UiTransaction { message, .. } = transaction;
@@ -162,32 +150,33 @@ impl Aggregator {
                                             timestamp: timestamp as u64,
                                         };
 
-                                        transactions.push(transaction_data);
+                                        transactions.push(transaction_data.clone());
+
+                                        // Save each transaction to the in-memory database
+                                        self.db.add_transaction(address, transaction_data).await;
                                     }
                                     _ => {}
                                 }
                             }
+                        } else {
+                            info!(
+                                "Skipping transaction from previous epoch: {}",
+                                signature_info.signature
+                            );
                         }
                     }
                 }
             }
 
-            Ok(transactions)
+            Ok::<Vec<TransactionData>, AggregatorError>(transactions)
         })
-        .await;
+        .await??;
 
-        match result {
-            Ok(res) => {
-                info!(
-                    "Transaction fetch completed successfully for address: {}",
-                    address
-                );
-                res
-            }
-            Err(_) => {
-                error!("Transaction fetch timed out for address: {}", address);
-                Err(AggregatorError::Timeout)
-            }
-        }
+        info!(
+            "Transaction fetch completed successfully for address: {}",
+            address
+        );
+
+        Ok(transactions)
     }
 }

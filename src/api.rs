@@ -1,67 +1,93 @@
-use crate::aggregator::{Aggregator, AggregatorError}; // Import AggregatorError
+use crate::db::InMemoryDatabase;
+use chrono::{NaiveDate, TimeZone, Utc};
 use log::{error, info};
+use serde::Deserialize;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use warp::http::StatusCode;
 use warp::Filter;
-use warp::Reply; // Import log
+use warp::Reply;
 
+// Define query parameters structure
+#[derive(Debug, Deserialize)]
+pub struct TransactionQueryParams {
+    pub pub_key: String,
+    pub day: Option<String>,   // Date in "dd/mm/yyyy" format
+    pub limit: Option<usize>,  // Number of transactions to return
+    pub offset: Option<usize>, // Pagination offset
+}
+
+// Create the API with enhanced querying capabilities
 pub fn create_api(
-    aggregator: Arc<Mutex<Aggregator>>,
+    db: Arc<InMemoryDatabase>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    let aggregator_filter = warp::any().map(move || aggregator.clone());
+    let db_filter = warp::any().map(move || db.clone());
 
-    // Define the route to fetch recent transactions for a given public key
-    warp::path!("transactions" / String)
-        .and(aggregator_filter)
+    warp::path("transactions")
+        .and(warp::query::<TransactionQueryParams>()) // Parse query parameters
+        .and(db_filter)
         .and_then(handle_get_transactions)
 }
 
+// API handler function
 async fn handle_get_transactions(
-    pub_key: String,
-    aggregator: Arc<Mutex<Aggregator>>,
+    params: TransactionQueryParams,
+    db: Arc<InMemoryDatabase>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("Received request for public key: {}", pub_key);
+    info!("Received request for public key: {}", params.pub_key);
 
-    let locked_aggregator = aggregator.lock().await;
+    let transactions = db.get_transactions(&params.pub_key).await;
 
-    match locked_aggregator.fetch_recent_transactions(&pub_key).await {
-        Ok(transactions) => {
-            let limited_transactions = &transactions[..std::cmp::min(5, transactions.len())];
-            info!(
-                "Returning {} transactions for public key: {}",
-                limited_transactions.len(),
-                pub_key
-            );
-            Ok(warp::reply::json(&limited_transactions).into_response())
-        }
-        Err(AggregatorError::Timeout) => {
-            error!(
-                "Timeout occurred while fetching transactions for public key: {}",
-                pub_key
-            );
+    // Filter by date if provided
+    let filtered_transactions = if let Some(ref day) = params.day {
+        if let Ok(date_filter) = parse_date(day) {
+            transactions
+                .into_iter()
+                .filter(|tx| is_same_day(tx.timestamp, date_filter))
+                .collect()
+        } else {
+            error!("Invalid date format: {}", day);
             let error_message = warp::reply::json(&serde_json::json!({
-                "error": "Timeout fetching transactions",
-                "details": "The request took too long to complete."
+                "error": "Invalid date format",
+                "details": "Please use the format dd/mm/yyyy."
             }));
-            Ok(
-                warp::reply::with_status(error_message, StatusCode::REQUEST_TIMEOUT)
-                    .into_response(),
-            )
-        }
-        Err(e) => {
-            error!(
-                "Error fetching transactions for public key: {}: {:?}",
-                pub_key, e
+            return Ok(
+                warp::reply::with_status(error_message, StatusCode::BAD_REQUEST).into_response(),
             );
-            let error_message = warp::reply::json(&serde_json::json!({
-                "error": "Failed to fetch transactions",
-                "details": format!("{:?}", e)
-            }));
-            Ok(
-                warp::reply::with_status(error_message, StatusCode::INTERNAL_SERVER_ERROR)
-                    .into_response(),
-            )
         }
+    } else {
+        transactions
+    };
+
+    // Apply pagination if limit and/or offset are provided
+    let total = filtered_transactions.len();
+    let limit = params.limit.unwrap_or(5);
+    let offset = params.offset.unwrap_or(0);
+    let limited_transactions = filtered_transactions
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    info!(
+        "Returning {} transactions (total: {}) for public key: {}",
+        limited_transactions.len(),
+        total,
+        params.pub_key
+    );
+    Ok(warp::reply::json(&limited_transactions).into_response())
+}
+
+// Helper function to parse a date string
+fn parse_date(date_str: &str) -> Result<NaiveDate, chrono::format::ParseError> {
+    NaiveDate::parse_from_str(date_str, "%d/%m/%Y")
+}
+
+// Helper function to check if a transaction's timestamp matches a specific day
+fn is_same_day(timestamp: u64, date: NaiveDate) -> bool {
+    let datetime = Utc.timestamp_opt(timestamp as i64, 0).single();
+    if let Some(transaction_date) = datetime {
+        transaction_date.date_naive() == date
+    } else {
+        false
     }
 }

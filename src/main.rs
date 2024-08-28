@@ -1,12 +1,14 @@
 mod aggregator;
 mod api;
+mod db;
 
 use aggregator::Aggregator;
-use api::create_api; // Import create_api function from api.rs
+use api::create_api;
+use db::InMemoryDatabase;
 use dotenv::dotenv;
-use env_logger::Env; // Import Env from env_logger
+use env_logger::Env;
 use log::{error, info};
-use std::env; // Import std::env to access environment variables
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
@@ -21,14 +23,19 @@ async fn main() {
     let rpc_url = env::var("SOLANA_RPC_URL").expect("SOLANA_RPC_URL must be set");
     let pub_key = env::var("SOLANA_PUBLIC_KEY").expect("SOLANA_PUBLIC_KEY must be set");
 
-    let aggregator = Arc::new(Mutex::new(Aggregator::new(&rpc_url)));
+    // Initialize the in-memory database with a file path for persistence
+    let db = Arc::new(InMemoryDatabase::new("transactions.txt".to_string()));
+
+    // Load data from the file into the in-memory database
+    db.load_from_file().await;
+
+    let aggregator = Arc::new(Mutex::new(Aggregator::new(&rpc_url, db.clone())));
 
     info!("Starting Solana Data Aggregator...");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let aggregator_clone = aggregator.clone();
-    let api = create_api(aggregator_clone);
+    let api = create_api(db.clone());
     let addr: SocketAddr = ([127, 0, 0, 1], 3030).into();
 
     let (_, warp_server_future) = warp::serve(api).bind_with_graceful_shutdown(addr, async {

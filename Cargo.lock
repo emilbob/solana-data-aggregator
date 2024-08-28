@@ -3343,6 +3343,7 @@ dependencies = [
 name = "solana-data-aggregator"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dotenv",
  "env_logger 0.10.2",
  "log",
