@@ -1,3 +1,7 @@
 /target
 .env
 transactions.txt
+api_test_transactions.txt
+mock_test_transactions.txt
+persistence_test_transactions.txt
+test_transactions.txt
