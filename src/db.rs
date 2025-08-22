@@ -23,6 +23,16 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Retrieves a transaction by its signature.
+    pub async fn get_transaction_by_signature(&self, signature: &str) -> Option<TransactionData> {
+        let transactions = self.transactions.lock().await;
+        for txs in transactions.values() {
+            if let Some(tx) = txs.iter().find(|t| t.signature == signature) {
+                return Some(tx.clone());
+            }
+        }
+        None
+    }
     /// Creates a new `InMemoryDatabase` instance with the specified file path for persistence.
     ///
     /// # Arguments

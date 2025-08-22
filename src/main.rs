@@ -36,22 +36,31 @@ async fn main() {
     // Initialize the aggregator with the RPC URL and the database reference
     let aggregator = Arc::new(Mutex::new(Aggregator::new(&rpc_url, db.clone())));
 
+    // Refresh callback for /refresh endpoint
+    let aggregator_clone = aggregator.clone();
+    let pub_key_clone = pub_key.clone();
+    let refresh_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let aggregator = aggregator_clone.clone();
+        let pub_key = pub_key_clone.clone();
+        tokio::spawn(async move {
+            let locked_aggregator = aggregator.lock().await;
+            let _ = locked_aggregator.fetch_recent_transactions(&pub_key).await;
+        });
+    });
+
     info!("Starting Solana Data Aggregator...");
 
     // Set up a one-shot channel for shutdown signaling
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Create the API and bind it to the specified address
-    let api = create_api(db.clone());
+    let api = create_api(db.clone(), rpc_url.clone(), refresh_callback);
     let addr: SocketAddr = ([127, 0, 0, 1], 3030).into();
 
-    // Start the Warp server with graceful shutdown capability
-    let (_, warp_server_future) = warp::serve(api).bind_with_graceful_shutdown(addr, async {
-        shutdown_rx.await.ok();
+    // Start the Warp server (spawned so we can abort it on shutdown)
+    let warp_server_task = tokio::spawn(async move {
+        warp::serve(api).run(addr).await;
     });
-
-    // Spawn the Warp server task
-    let warp_server_task = tokio::spawn(warp_server_future);
 
     // Task to periodically fetch recent transactions from the Solana blockchain
     let fetch_task = tokio::spawn(async move {

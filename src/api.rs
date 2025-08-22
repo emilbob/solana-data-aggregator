@@ -3,9 +3,7 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use log::{error, info};
 use serde::Deserialize;
 use std::sync::Arc;
-use warp::http::StatusCode;
 use warp::Filter;
-use warp::Reply;
 
 /// Struct to define the query parameters for the API requests.
 #[derive(Debug, Deserialize)]
@@ -16,6 +14,7 @@ pub struct TransactionQueryParams {
     pub offset: Option<usize>, // Optional pagination offset
 }
 
+use serde::Serialize;
 /// Creates the API with enhanced querying capabilities.
 ///
 /// # Arguments
@@ -25,15 +24,107 @@ pub struct TransactionQueryParams {
 /// # Returns
 ///
 /// A warp filter that handles incoming HTTP requests to fetch transactions.
+use solana_client::rpc_client::RpcClient;
+use warp::filters::BoxedFilter;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct BalanceResponse {
+    pub_key: String,
+    balance: u64,
+}
+
 pub fn create_api(
     db: Arc<InMemoryDatabase>,
-) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    rpc_url: String,
+    refresh_callback: Arc<dyn Fn() + Send + Sync>,
+) -> BoxedFilter<(impl warp::Reply,)> {
     let db_filter = warp::any().map(move || db.clone());
+    let rpc_url_filter = warp::any().map(move || rpc_url.clone());
+    let refresh_callback_filter = warp::any().map(move || refresh_callback.clone());
 
-    warp::path("transactions")
-        .and(warp::query::<TransactionQueryParams>()) // Parse query parameters
-        .and(db_filter)
-        .and_then(handle_get_transactions)
+    // /health endpoint
+    let health = warp::path("health")
+        .and(warp::get())
+        .map(|| warp::reply::json(&HealthResponse { status: "ok" }));
+
+    // /transactions (list)
+    let transactions = warp::path("transactions")
+        .and(warp::get())
+        .and(warp::query::<TransactionQueryParams>())
+        .and(db_filter.clone())
+        .and_then(handle_get_transactions);
+
+    // /transactions/{signature}
+    let transaction_by_sig = warp::path!("transactions" / String)
+        .and(warp::get())
+        .and(db_filter.clone())
+        .and_then(handle_get_transaction_by_signature);
+
+    // /accounts/{pub_key}/balance
+    let account_balance = warp::path!("accounts" / String / "balance")
+        .and(warp::get())
+        .and(rpc_url_filter.clone())
+        .and_then(handle_get_account_balance);
+
+    // /refresh (POST)
+    let refresh = warp::path("refresh")
+        .and(warp::post())
+        .and(refresh_callback_filter.clone())
+        .map(|refresh_callback: Arc<dyn Fn() + Send + Sync>| {
+            (refresh_callback)();
+            warp::reply::json(&serde_json::json!({"status": "refresh triggered"}))
+        });
+
+    health
+        .or(transactions)
+        .or(transaction_by_sig)
+        .or(account_balance)
+        .or(refresh)
+        .boxed()
+}
+/// Handles GET /transactions/{signature}
+async fn handle_get_transaction_by_signature(
+    signature: String,
+    db: Arc<InMemoryDatabase>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    if let Some(tx) = db.get_transaction_by_signature(&signature).await {
+        Ok(warp::reply::json(&tx))
+    } else {
+        let error_message = warp::reply::json(&serde_json::json!({
+            "error": "Transaction not found"
+        }));
+        Ok(error_message)
+    }
+}
+
+/// Handles GET /accounts/{pub_key}/balance
+async fn handle_get_account_balance(
+    pub_key: String,
+    rpc_url: String,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let client = RpcClient::new(rpc_url);
+    match pub_key.parse() {
+        Ok(pubkey) => match client.get_balance(&pubkey) {
+            Ok(balance) => Ok(warp::reply::json(&BalanceResponse { pub_key, balance })),
+            Err(e) => {
+                let error_message = warp::reply::json(&serde_json::json!({
+                    "error": format!("Failed to fetch balance: {}", e)
+                }));
+                Ok(error_message)
+            }
+        },
+        Err(_) => {
+            let error_message = warp::reply::json(&serde_json::json!({
+                "error": "Invalid public key format"
+            }));
+            Ok(error_message)
+        }
+    }
 }
 
 /// Handles incoming API requests to fetch transactions.
@@ -68,9 +159,7 @@ async fn handle_get_transactions(
                 "error": "Invalid date format",
                 "details": "Please use the format dd/mm/yyyy."
             }));
-            return Ok(
-                warp::reply::with_status(error_message, StatusCode::BAD_REQUEST).into_response(),
-            );
+            return Ok(error_message);
         }
     } else {
         transactions
@@ -93,7 +182,7 @@ async fn handle_get_transactions(
         params.pub_key
     );
 
-    Ok(warp::reply::json(&limited_transactions).into_response())
+    Ok(warp::reply::json(&limited_transactions))
 }
 
 /// Parses a date string in "dd/mm/yyyy" format into a `NaiveDate`.
@@ -164,8 +253,8 @@ mod tests {
         db.add_transaction("mock_sender_2", transaction2.clone())
             .await;
 
-        // Create the API with the mocked database
-        let api = create_api(db.clone());
+        // Create the API with the mocked database, dummy rpc_url, and no-op refresh callback
+        let api = create_api(db.clone(), "mock_rpc_url".to_string(), Arc::new(|| {}));
 
         // Query the API for the first transaction
         let response1 = request()
