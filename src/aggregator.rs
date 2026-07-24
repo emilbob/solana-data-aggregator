@@ -5,7 +5,9 @@ use log::{info, warn};
 use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter};
+use solana_client::rpc_config::{
+    RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
+};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::option_serializer::OptionSerializer;
@@ -46,6 +48,7 @@ pub enum AggregatorError {
 /// Struct that handles fetching transactions from the Solana blockchain and storing
 /// them via the configured storage backend.
 pub struct Aggregator {
+    network: String,    // Cluster this aggregator monitors ("mainnet"/"devnet"/…)
     client: RpcClient,  // Solana RPC client used to interact with the blockchain
     db: Arc<Store>,     // Storage backend (in-memory or Postgres)
     fetch_limit: usize, // Max signatures to pull per cycle (bounds the per-cycle work)
@@ -73,9 +76,16 @@ impl Aggregator {
     /// # Returns
     ///
     /// A new instance of `Aggregator`.
-    pub fn new(url: &str, db: Arc<Store>, fetch_limit: usize, timeout_secs: u64) -> Self {
+    pub fn new(
+        network: &str,
+        url: &str,
+        db: Arc<Store>,
+        fetch_limit: usize,
+        timeout_secs: u64,
+    ) -> Self {
         let client = RpcClient::new(url.to_string());
         Self {
+            network: network.to_string(),
             client,
             db,
             fetch_limit: fetch_limit.max(1),
@@ -183,7 +193,9 @@ impl Aggregator {
             // Persist each decoded transaction (idempotent by signature) and log
             // a readable summary so the terminal narrates what was ingested.
             for tx in &transactions {
-                self.db.add_transaction(address, tx.clone()).await;
+                self.db
+                    .add_transaction(&self.network, address, tx.clone())
+                    .await;
                 info!("ingested {}", tx.summary());
             }
 
@@ -229,7 +241,9 @@ impl Aggregator {
                                 let sig = resp.value.signature;
                                 if let Some(tx) = self.decode_signature(sig, epoch_start_time).await
                                 {
-                                    self.db.add_transaction(&account, tx.clone()).await;
+                                    self.db
+                                        .add_transaction(&self.network, &account, tx.clone())
+                                        .await;
                                     info!("ingested (ws) {}", tx.summary());
                                 }
                             }
@@ -261,9 +275,19 @@ impl Aggregator {
             }
         };
 
+        // `max_supported_transaction_version: Some(0)` is required or the RPC
+        // errors on versioned (v0) transactions — common on mainnet (DEX swaps,
+        // anything using address lookup tables).
         let tx = self
             .client
-            .get_transaction(&signature, UiTransactionEncoding::JsonParsed)
+            .get_transaction_with_config(
+                &signature,
+                RpcTransactionConfig {
+                    encoding: Some(UiTransactionEncoding::JsonParsed),
+                    commitment: None,
+                    max_supported_transaction_version: Some(0),
+                },
+            )
             .await
             .ok()?;
 
@@ -556,9 +580,10 @@ mod tests {
             token_changes: vec![],
         };
 
-        db.add_transaction("sender1", transaction.clone()).await;
+        db.add_transaction("mainnet", "sender1", transaction.clone())
+            .await;
 
-        let transactions = db.get_transactions("sender1").await;
+        let transactions = db.get_transactions("mainnet", "sender1").await;
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
     }

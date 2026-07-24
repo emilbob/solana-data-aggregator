@@ -30,7 +30,7 @@
   .dot.bad { background: var(--fail); box-shadow: 0 0 8px var(--fail); }
   main { max-width: 1200px; margin: 0 auto; padding: 22px 24px 60px; }
   .controls {
-    display: grid; grid-template-columns: 1fr auto auto auto auto auto; gap: 10px;
+    display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 10px;
     align-items: end; background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 16px; margin-bottom: 18px;
   }
@@ -84,16 +84,16 @@
 
 <main>
   <div class="controls">
-    <div class="field" style="grid-column: 1 / 2;">
+    <div class="field"><label for="network">Network</label>
+      <select id="network" title="Which cluster's data to view. Populated from the accounts the server is monitoring."></select>
+    </div>
+    <div class="field" style="grid-column: 2 / 3;">
       <label for="pubkey">Monitored account (pub_key)</label>
       <input id="pubkey" class="pubkey" list="accounts-list" placeholder="Account public key (base58) — pick a monitored account or paste one" />
       <datalist id="accounts-list"></datalist>
     </div>
     <div class="field"><label for="limit">Limit</label><input id="limit" type="number" min="1" value="25" style="width:80px" /></div>
     <div class="field"><label for="offset">Offset</label><input id="offset" type="number" min="0" value="0" style="width:80px" /></div>
-    <div class="field"><label for="cluster">Explorer links</label>
-      <select id="cluster" title="Cluster for the Solana Explorer signature links. Does NOT change the data source — that's set by the server's RPC. Match it to your backend's network."><option value="testnet">testnet</option><option value="devnet">devnet</option><option value="mainnet-beta">mainnet</option></select>
-    </div>
     <div class="field"><label>&nbsp;</label><button id="load" class="primary">Load</button></div>
     <div class="field"><label>&nbsp;</label><button id="refresh" class="ghost" title="Ask the backend to fetch new transactions from the chain">Refresh chain</button></div>
   </div>
@@ -133,10 +133,15 @@ async function checkHealth() {
   }
 }
 
-async function loadBalance(pk) {
+// Map a monitored-network name to the Solana Explorer cluster for links.
+const NETWORK_CLUSTER = { mainnet: "mainnet-beta", "mainnet-beta": "mainnet-beta", devnet: "devnet", testnet: "testnet" };
+const explorerCluster = (net) => NETWORK_CLUSTER[net] || "mainnet-beta";
+let networksData = {};  // network name -> accounts[]
+
+async function loadBalance(pk, network) {
   $("s-balance").textContent = "…";
   try {
-    const r = await fetch(`/accounts/${encodeURIComponent(pk)}/balance`);
+    const r = await fetch(`/accounts/${encodeURIComponent(pk)}/balance?network=${encodeURIComponent(network)}`);
     const j = await r.json();
     $("s-balance").textContent = j.balance != null ? sol(j.balance) : (j.error || "—");
   } catch { $("s-balance").textContent = "—"; }
@@ -187,16 +192,16 @@ let lastTxs = [];  // last-loaded rows, so re-rendering (e.g. on cluster change)
 async function load() {
   const pk = $("pubkey").value.trim();
   if (!pk) { $("pubkey").focus(); return; }
+  const network = $("network").value;
   const limit = $("limit").value || 25, offset = $("offset").value || 0;
-  const cluster = $("cluster").value;
   $("load").disabled = true;
   $("rows").innerHTML = `<tr><td colspan="8"><div class="msg">Loading…</div></td></tr>`;
   try {
-    const r = await fetch(`/transactions?pub_key=${encodeURIComponent(pk)}&limit=${limit}&offset=${offset}`);
+    const r = await fetch(`/transactions?network=${encodeURIComponent(network)}&pub_key=${encodeURIComponent(pk)}&limit=${limit}&offset=${offset}`);
     const txs = await r.json();
     lastTxs = Array.isArray(txs) ? txs : [];
-    render(txs, cluster);
-    loadBalance(pk);
+    render(txs, explorerCluster(network));
+    loadBalance(pk, network);
   } catch (e) {
     $("rows").innerHTML = `<tr><td colspan="8"><div class="msg error">Failed to load: ${e}</div></td></tr>`;
   } finally { $("load").disabled = false; }
@@ -208,26 +213,42 @@ async function refreshChain() {
   catch {} finally { setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 1500); }
 }
 
-$("load").addEventListener("click", load);
-$("refresh").addEventListener("click", refreshChain);
-$("pubkey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
-// The cluster only controls where the Explorer links point — re-render the
-// current rows immediately so the links update without a reload.
-$("cluster").addEventListener("change", () => render(lastTxs, $("cluster").value));
+function resetView(msg) {
+  $("pubkey").value = "";
+  lastTxs = [];
+  $("rows").innerHTML = `<tr><td colspan="8"><div class="msg">${msg}</div></td></tr>`;
+  for (const id of ["s-count", "s-balance", "s-fees", "s-transfer"]) $(id).textContent = "—";
+}
 
-// Populate the monitored-account dropdown from the backend. The input is left
-// empty on purpose — pick a monitored account or paste one, then Load.
-async function loadAccounts() {
+// Fill the account picker's datalist for the selected network.
+function populateAccounts(network) {
+  const accts = networksData[network] || [];
+  $("accounts-list").innerHTML = accts.map((a) => `<option value="${a}">`).join("");
+}
+
+// Populate the network dropdown + per-network accounts from the backend.
+async function loadNetworks() {
   try {
-    const r = await fetch("/accounts");
-    const accts = await r.json();
-    if (Array.isArray(accts)) {
-      $("accounts-list").innerHTML = accts.map((a) => `<option value="${a}">`).join("");
-    }
+    const r = await fetch("/networks");
+    const nets = await r.json();
+    if (!Array.isArray(nets) || !nets.length) return;
+    networksData = {};
+    for (const n of nets) networksData[n.name] = n.accounts || [];
+    $("network").innerHTML = nets.map((n) => `<option value="${n.name}">${n.name}</option>`).join("");
+    populateAccounts($("network").value);
   } catch {}
 }
 
-loadAccounts();
+$("load").addEventListener("click", load);
+$("refresh").addEventListener("click", refreshChain);
+$("pubkey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+// Switching network changes the data source: repopulate accounts and clear the view.
+$("network").addEventListener("change", () => {
+  populateAccounts($("network").value);
+  resetView("Pick an account and press <b>Load</b>.");
+});
+
+loadNetworks();
 checkHealth();
 setInterval(checkHealth, 15000);
 </script>

@@ -1,32 +1,37 @@
 use crate::store::Store;
 use chrono::{NaiveDate, TimeZone, Utc};
 use log::{error, info};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use solana_client::nonblocking::rpc_client::RpcClient;
 use std::sync::Arc;
 use std::time::Instant;
+use warp::filters::BoxedFilter;
 use warp::Filter;
 
-/// Struct to define the query parameters for the API requests.
-#[derive(Debug, Deserialize)]
-pub struct TransactionQueryParams {
-    pub pub_key: String, // The public key of the account to fetch transactions for
-    pub day: Option<String>, // Optional date filter in "dd/mm/yyyy" format
-    pub limit: Option<usize>, // Optional limit on the number of transactions to return
-    pub offset: Option<usize>, // Optional pagination offset
+/// A monitored cluster, as the API needs it. `rpc_url` is used server-side for
+/// the balance endpoint and is never serialized to clients.
+#[derive(Clone)]
+pub struct NetworkApi {
+    pub name: String,
+    pub rpc_url: String,
+    pub accounts: Vec<String>,
 }
 
-use serde::Serialize;
-/// Creates the API with enhanced querying capabilities.
-///
-/// # Arguments
-///
-/// * `db` - A thread-safe reference to the storage backend.
-///
-/// # Returns
-///
-/// A warp filter that handles incoming HTTP requests to fetch transactions.
-use solana_client::nonblocking::rpc_client::RpcClient;
-use warp::filters::BoxedFilter;
+/// Query parameters for `/transactions`.
+#[derive(Debug, Deserialize)]
+pub struct TransactionQueryParams {
+    pub pub_key: String,
+    pub network: Option<String>, // Cluster; defaults to the first configured network
+    pub day: Option<String>,     // Optional date filter in "dd/mm/yyyy" format
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Query parameter carrying just an optional network (for `/accounts`, balance).
+#[derive(Debug, Deserialize)]
+pub struct NetworkQuery {
+    pub network: Option<String>,
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -39,16 +44,33 @@ struct BalanceResponse {
     balance: u64,
 }
 
+#[derive(Serialize)]
+struct NetworkInfo {
+    name: String,
+    accounts: Vec<String>,
+}
+
+/// Picks the network by name, or falls back to the first configured one.
+fn resolve_network<'a>(
+    networks: &'a [NetworkApi],
+    name: &Option<String>,
+) -> Option<&'a NetworkApi> {
+    match name {
+        Some(n) => networks.iter().find(|net| &net.name == n),
+        None => networks.first(),
+    }
+}
+
 pub fn create_api(
     db: Arc<Store>,
-    rpc_url: String,
-    accounts: Vec<String>,
+    networks: Vec<NetworkApi>,
     started: Instant,
     refresh_callback: Arc<dyn Fn() + Send + Sync>,
 ) -> BoxedFilter<(impl warp::Reply,)> {
+    let networks = Arc::new(networks);
     let db_filter = warp::any().map(move || db.clone());
-    let rpc_url_filter = warp::any().map(move || rpc_url.clone());
-    let accounts_filter = warp::any().map(move || accounts.clone());
+    let nets = networks.clone();
+    let networks_filter = warp::any().map(move || nets.clone());
     let started_filter = warp::any().map(move || started);
     let refresh_callback_filter = warp::any().map(move || refresh_callback.clone());
 
@@ -66,15 +88,24 @@ pub fn create_api(
     let metrics = warp::path("metrics")
         .and(warp::get())
         .and(db_filter.clone())
-        .and(accounts_filter.clone())
+        .and(networks_filter.clone())
         .and(started_filter)
         .and_then(handle_metrics);
 
+    // /networks — list of monitored clusters (name + accounts; never the rpc_url)
+    let networks_list = warp::path("networks")
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(networks_filter.clone())
+        .and_then(handle_networks);
+
     // /transactions (list)
     let transactions = warp::path("transactions")
+        .and(warp::path::end())
         .and(warp::get())
         .and(warp::query::<TransactionQueryParams>())
         .and(db_filter.clone())
+        .and(networks_filter.clone())
         .and_then(handle_get_transactions);
 
     // /transactions/{signature}
@@ -83,17 +114,19 @@ pub fn create_api(
         .and(db_filter.clone())
         .and_then(handle_get_transaction_by_signature);
 
-    // /accounts (list monitored accounts)
+    // /accounts (list monitored accounts, optionally for a given ?network=)
     let accounts_list = warp::path("accounts")
         .and(warp::path::end())
         .and(warp::get())
-        .and(accounts_filter.clone())
-        .map(|accounts: Vec<String>| warp::reply::json(&accounts));
+        .and(warp::query::<NetworkQuery>())
+        .and(networks_filter.clone())
+        .and_then(handle_accounts);
 
     // /accounts/{pub_key}/balance
     let account_balance = warp::path!("accounts" / String / "balance")
         .and(warp::get())
-        .and(rpc_url_filter.clone())
+        .and(warp::query::<NetworkQuery>())
+        .and(networks_filter.clone())
         .and_then(handle_get_account_balance);
 
     // /refresh (POST)
@@ -108,6 +141,7 @@ pub fn create_api(
     index
         .or(health)
         .or(metrics)
+        .or(networks_list)
         .or(accounts_list)
         .or(transactions)
         .or(transaction_by_sig)
@@ -116,25 +150,54 @@ pub fn create_api(
         .boxed()
 }
 
+/// Handles GET /networks — the monitored clusters (name + accounts only).
+async fn handle_networks(
+    networks: Arc<Vec<NetworkApi>>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let out: Vec<NetworkInfo> = networks
+        .iter()
+        .map(|n| NetworkInfo {
+            name: n.name.clone(),
+            accounts: n.accounts.clone(),
+        })
+        .collect();
+    Ok(warp::reply::json(&out))
+}
+
+/// Handles GET /accounts — accounts for the requested (or first) network.
+async fn handle_accounts(
+    q: NetworkQuery,
+    networks: Arc<Vec<NetworkApi>>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let accounts = resolve_network(&networks, &q.network)
+        .map(|n| n.accounts.clone())
+        .unwrap_or_default();
+    Ok(warp::reply::json(&accounts))
+}
+
 /// Handles GET /metrics — Prometheus text exposition of basic service metrics.
 async fn handle_metrics(
     db: Arc<Store>,
-    accounts: Vec<String>,
+    networks: Arc<Vec<NetworkApi>>,
     started: Instant,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let total = db.count().await;
     let uptime = started.elapsed().as_secs();
+    let account_count: usize = networks.iter().map(|n| n.accounts.len()).sum();
     let body = format!(
         "# HELP solana_aggregator_transactions_total Total transactions stored.\n\
          # TYPE solana_aggregator_transactions_total gauge\n\
          solana_aggregator_transactions_total {total}\n\
-         # HELP solana_aggregator_monitored_accounts Number of monitored accounts.\n\
+         # HELP solana_aggregator_monitored_accounts Number of monitored accounts (all networks).\n\
          # TYPE solana_aggregator_monitored_accounts gauge\n\
-         solana_aggregator_monitored_accounts {}\n\
+         solana_aggregator_monitored_accounts {account_count}\n\
+         # HELP solana_aggregator_monitored_networks Number of monitored networks.\n\
+         # TYPE solana_aggregator_monitored_networks gauge\n\
+         solana_aggregator_monitored_networks {}\n\
          # HELP solana_aggregator_uptime_seconds Seconds since the service started.\n\
          # TYPE solana_aggregator_uptime_seconds counter\n\
          solana_aggregator_uptime_seconds {uptime}\n",
-        accounts.len()
+        networks.len()
     );
     Ok(warp::reply::with_header(
         body,
@@ -157,12 +220,18 @@ async fn handle_get_transaction_by_signature(
     }
 }
 
-/// Handles GET /accounts/{pub_key}/balance
+/// Handles GET /accounts/{pub_key}/balance — uses the requested network's RPC.
 async fn handle_get_account_balance(
     pub_key: String,
-    rpc_url: String,
+    q: NetworkQuery,
+    networks: Arc<Vec<NetworkApi>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let client = RpcClient::new(rpc_url);
+    let Some(net) = resolve_network(&networks, &q.network) else {
+        return Ok(warp::reply::json(
+            &serde_json::json!({"error": "Unknown network"}),
+        ));
+    };
+    let client = RpcClient::new(net.rpc_url.clone());
     match pub_key.parse() {
         Ok(pubkey) => match client.get_balance(&pubkey).await {
             Ok(balance) => Ok(warp::reply::json(&BalanceResponse { pub_key, balance })),
@@ -195,11 +264,16 @@ async fn handle_get_account_balance(
 async fn handle_get_transactions(
     params: TransactionQueryParams,
     db: Arc<Store>,
+    networks: Arc<Vec<NetworkApi>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("Received request for public key: {}", params.pub_key);
+    // Resolve the network (query param, or the first configured one).
+    let network = resolve_network(&networks, &params.network)
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+    info!("Request for {} on network '{}'", params.pub_key, network);
 
-    // Retrieve all transactions for the given public key
-    let transactions = db.get_transactions(&params.pub_key).await;
+    // Retrieve all transactions for (network, public key)
+    let transactions = db.get_transactions(&network, &params.pub_key).await;
 
     // Filter transactions by date if the `day` parameter is provided
     let filtered_transactions = if let Some(ref day) = params.day {
@@ -315,17 +389,20 @@ mod tests {
             token_changes: vec![],
         };
 
-        // Add transactions to the in-memory database
-        db.add_transaction("mock_sender_1", transaction1.clone())
+        // Add transactions to the in-memory database (under network "mainnet")
+        db.add_transaction("mainnet", "mock_sender_1", transaction1.clone())
             .await;
-        db.add_transaction("mock_sender_2", transaction2.clone())
+        db.add_transaction("mainnet", "mock_sender_2", transaction2.clone())
             .await;
 
-        // Create the API with the mocked database, dummy rpc_url, and no-op refresh callback
+        // Create the API with one network ("mainnet") and a no-op refresh callback
         let api = create_api(
             db.clone(),
-            "mock_rpc_url".to_string(),
-            vec!["mock_sender_1".to_string(), "mock_sender_2".to_string()],
+            vec![NetworkApi {
+                name: "mainnet".to_string(),
+                rpc_url: "mock_rpc_url".to_string(),
+                accounts: vec!["mock_sender_1".to_string(), "mock_sender_2".to_string()],
+            }],
             Instant::now(),
             Arc::new(|| {}),
         );
