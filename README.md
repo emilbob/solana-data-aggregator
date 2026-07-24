@@ -69,10 +69,18 @@ SOLANA_RPC_URL=https://api.testnet.solana.com
 SOLANA_PUBLIC_KEY=YourPublicKeyHere
 # Optional — defaults to 127.0.0.1:3030
 SERVER_ADDR=127.0.0.1:3030
+# Optional — max signatures pulled per fetch cycle (default 20)
+FETCH_LIMIT=20
 ```
 
-Replace YourPublicKeyHere with the public key you want to monitor. `SERVER_ADDR`
-is optional and controls the address the HTTP API binds to.
+Replace YourPublicKeyHere with the public key you want to monitor.
+
+- `SERVER_ADDR` (optional) — the address the HTTP API binds to.
+- `FETCH_LIMIT` (optional, default `20`) — how many recent signatures to pull
+  each cycle. Each cycle fetches only transactions newer than the last one it
+  ingested and decodes them concurrently, so a small limit keeps a busy account
+  from exceeding the per-cycle timeout. Very active accounts on a slow/public
+  RPC still benefit from a dedicated RPC provider (e.g. Helius).
 
 ### Build the Project
 

@@ -1,9 +1,10 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// Represents a transaction on the Solana blockchain.
@@ -81,7 +82,7 @@ impl InMemoryDatabase {
         entry.push(transaction.clone());
         drop(transactions); // release the lock before touching the filesystem
 
-        if let Err(e) = self.append_to_file(pub_key, &transaction) {
+        if let Err(e) = self.append_to_file(pub_key, &transaction).await {
             warn!(
                 "Failed to persist transaction {}: {}",
                 transaction.signature, e
@@ -89,19 +90,27 @@ impl InMemoryDatabase {
         }
     }
 
-    /// Appends a single record to the persistence file. Returns any I/O or
-    /// serialization error to the caller rather than panicking.
-    fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
+    /// Appends a single record to the persistence file without blocking the
+    /// async runtime. Returns any I/O or serialization error to the caller
+    /// rather than panicking.
+    async fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
         let record = PersistedTx {
             key: key.to_string(),
             tx: tx.clone(),
         };
-        let serialized = serde_json::to_string(&record)?;
-        let mut file = OpenOptions::new()
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.file_path)?;
-        writeln!(file, "{}", serialized)
+            .open(&self.file_path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        // `tokio::fs::File` buffers internally and only flushes on drop
+        // (asynchronously, not awaited), so without this the write can be
+        // invisible to a subsequent read — i.e. `add_transaction` could return
+        // before the transaction is actually persisted.
+        file.flush().await
     }
 
     /// Loads transactions from the persistence file into the in-memory database.
@@ -234,7 +243,11 @@ mod tests {
         db.add_transaction("acct", transaction.clone()).await;
 
         assert_eq!(db.get_transactions("acct").await.len(), 1);
-        let line_count = std::fs::read_to_string(path).unwrap().lines().count();
-        assert_eq!(line_count, 1, "duplicate adds must not grow the file");
+        let content = std::fs::read_to_string(path).unwrap();
+        let line_count = content.lines().count();
+        assert_eq!(
+            line_count, 1,
+            "duplicate adds must not grow the file; got {line_count} lines: {content:?}"
+        );
     }
 }
