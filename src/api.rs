@@ -47,6 +47,11 @@ pub fn create_api(
     let rpc_url_filter = warp::any().map(move || rpc_url.clone());
     let refresh_callback_filter = warp::any().map(move || refresh_callback.clone());
 
+    // Static dashboard (single self-contained page, embedded in the binary) at GET /
+    let index = warp::path::end()
+        .and(warp::get())
+        .map(|| warp::reply::html(include_str!("index.html")));
+
     // /health endpoint
     let health = warp::path("health")
         .and(warp::get())
@@ -80,7 +85,8 @@ pub fn create_api(
             warp::reply::json(&serde_json::json!({"status": "refresh triggered"}))
         });
 
-    health
+    index
+        .or(health)
         .or(transactions)
         .or(transaction_by_sig)
         .or(account_balance)

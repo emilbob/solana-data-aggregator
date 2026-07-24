@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Solana Data Aggregator</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131822; --panel2: #1a2130; --border: #232c3d;
+    --text: #e6ebf2; --muted: #8a94a6; --accent: #9945ff; --accent2: #14f195;
+    --ok: #14f195; --fail: #ff5c72; --chip: #202838;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(90deg, rgba(153,69,255,.14), rgba(20,241,149,.10));
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .logo { width: 26px; height: 26px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+  .health { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.bad { background: var(--fail); box-shadow: 0 0 8px var(--fail); }
+  main { max-width: 1200px; margin: 0 auto; padding: 22px 24px 60px; }
+  .controls {
+    display: grid; grid-template-columns: 1fr auto auto auto auto auto; gap: 10px;
+    align-items: end; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 18px;
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  input, select, button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px; font-size: 13px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  input.pubkey { font-family: ui-monospace, monospace; }
+  button { cursor: pointer; font-weight: 600; white-space: nowrap; transition: filter .15s, opacity .15s; }
+  button:hover { filter: brightness(1.15); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: linear-gradient(135deg, var(--accent), #7a2fff); border-color: transparent; }
+  button.ghost { background: var(--chip); }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+  .stat { flex: 1; min-width: 150px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .stat .v { font-size: 22px; font-weight: 650; margin-top: 4px; }
+  .stat .v.mono { font-size: 15px; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 820px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0; background: var(--panel); }
+  tbody tr:hover { background: rgba(255,255,255,.02); }
+  tbody tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .4px; }
+  .badge.transfer { background: rgba(20,241,149,.16); color: var(--accent2); }
+  .badge.vote { background: rgba(120,140,170,.18); color: #9fb0c9; }
+  .badge.token { background: rgba(153,69,255,.20); color: #c9a3ff; }
+  .badge.other { background: rgba(255,180,60,.16); color: #ffc25e; }
+  .status-ok { color: var(--ok); } .status-fail { color: var(--fail); font-weight: 700; }
+  a.sig { color: #8ab4ff; text-decoration: none; }
+  a.sig:hover { text-decoration: underline; }
+  .muted { color: var(--muted); }
+  .arrow { color: var(--accent2); }
+  .msg { padding: 40px; text-align: center; color: var(--muted); }
+  .msg.error { color: var(--fail); }
+  .transfer-cell { font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"></div>
+  <h1>Solana Data Aggregator</h1>
+  <div class="health"><span id="health-dot" class="dot"></span><span id="health-text">checking…</span></div>
+</header>
+
+<main>
+  <div class="controls">
+    <div class="field" style="grid-column: 1 / 2;">
+      <label for="pubkey">Monitored account (pub_key)</label>
+      <input id="pubkey" class="pubkey" placeholder="e.g. 72sZAEEF7kyZ3kSaYbv8EzDQUFzJJpNC9Q2QZJxjQgbq" />
+    </div>
+    <div class="field"><label for="limit">Limit</label><input id="limit" type="number" min="1" value="25" style="width:80px" /></div>
+    <div class="field"><label for="offset">Offset</label><input id="offset" type="number" min="0" value="0" style="width:80px" /></div>
+    <div class="field"><label for="cluster">Explorer</label>
+      <select id="cluster"><option value="testnet">testnet</option><option value="devnet">devnet</option><option value="mainnet-beta">mainnet</option></select>
+    </div>
+    <div class="field"><label>&nbsp;</label><button id="load" class="primary">Load</button></div>
+    <div class="field"><label>&nbsp;</label><button id="refresh" class="ghost" title="Ask the backend to fetch new transactions from the chain">Refresh chain</button></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Transactions shown</div><div class="v" id="s-count">—</div></div>
+    <div class="stat"><div class="k">Account balance</div><div class="v mono" id="s-balance">—</div></div>
+    <div class="stat"><div class="k">Total fees (shown)</div><div class="v mono" id="s-fees">—</div></div>
+    <div class="stat"><div class="k">SOL transferred (shown)</div><div class="v mono" id="s-transfer">—</div></div>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Type</th><th>Status</th><th>Fee</th><th>Fee payer</th><th>Slot</th><th>Transfer</th><th>Time</th><th>Signature</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="8"><div class="msg">Enter a public key and press <b>Load</b>.</div></td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const LAMPORTS = 1e9;
+const sol = (l) => (l / LAMPORTS).toLocaleString(undefined, { maximumFractionDigits: 9 }) + " SOL";
+const short = (s, n = 4) => s ? s.slice(0, n) + "…" + s.slice(-n) : "";
+const badgeClass = (t) => ["transfer", "vote", "token"].includes(t) ? t : "other";
+
+async function checkHealth() {
+  try {
+    const r = await fetch("/health"); const j = await r.json();
+    const ok = j.status === "ok";
+    $("health-dot").className = "dot " + (ok ? "ok" : "bad");
+    $("health-text").textContent = ok ? "backend online" : "backend degraded";
+  } catch {
+    $("health-dot").className = "dot bad"; $("health-text").textContent = "backend offline";
+  }
+}
+
+async function loadBalance(pk) {
+  $("s-balance").textContent = "…";
+  try {
+    const r = await fetch(`/accounts/${encodeURIComponent(pk)}/balance`);
+    const j = await r.json();
+    $("s-balance").textContent = j.balance != null ? sol(j.balance) : (j.error || "—");
+  } catch { $("s-balance").textContent = "—"; }
+}
+
+function render(txs, cluster) {
+  const rows = $("rows");
+  if (!Array.isArray(txs) || txs.length === 0) {
+    rows.innerHTML = `<tr><td colspan="8"><div class="msg">No transactions stored for this account yet. Try <b>Refresh chain</b>, then Load.</div></td></tr>`;
+    $("s-count").textContent = "0"; $("s-fees").textContent = "0 SOL"; $("s-transfer").textContent = "0 SOL";
+    return;
+  }
+  let totalFee = 0, totalTransfer = 0;
+  rows.innerHTML = txs.map((t) => {
+    totalFee += t.fee || 0;
+    const tr = t.transfer;
+    if (tr) totalTransfer += tr.lamports || 0;
+    const when = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString() : "—";
+    const transferCell = tr
+      ? `<span class="transfer-cell">${sol(tr.lamports)}<br><span class="muted">${short(tr.source)} <span class="arrow">→</span> ${short(tr.destination)}</span></span>`
+      : `<span class="muted">—</span>`;
+    const url = `https://explorer.solana.com/tx/${t.signature}?cluster=${cluster}`;
+    return `<tr>
+      <td><span class="badge ${badgeClass(t.tx_type)}">${t.tx_type}</span></td>
+      <td class="${t.success ? "status-ok" : "status-fail"}">${t.success ? "✓ ok" : "✗ fail"}</td>
+      <td class="mono">${sol(t.fee)}</td>
+      <td class="mono" title="${t.fee_payer}">${short(t.fee_payer, 6)}</td>
+      <td class="mono">${t.slot?.toLocaleString?.() ?? t.slot}</td>
+      <td>${transferCell}</td>
+      <td class="muted">${when}</td>
+      <td><a class="sig" href="${url}" target="_blank" rel="noopener" title="${t.signature}">${short(t.signature, 6)}</a></td>
+    </tr>`;
+  }).join("");
+  $("s-count").textContent = txs.length;
+  $("s-fees").textContent = sol(totalFee);
+  $("s-transfer").textContent = sol(totalTransfer);
+}
+
+async function load() {
+  const pk = $("pubkey").value.trim();
+  if (!pk) { $("pubkey").focus(); return; }
+  const limit = $("limit").value || 25, offset = $("offset").value || 0;
+  const cluster = $("cluster").value;
+  $("load").disabled = true;
+  $("rows").innerHTML = `<tr><td colspan="8"><div class="msg">Loading…</div></td></tr>`;
+  try {
+    const r = await fetch(`/transactions?pub_key=${encodeURIComponent(pk)}&limit=${limit}&offset=${offset}`);
+    const txs = await r.json();
+    render(txs, cluster);
+    loadBalance(pk);
+    localStorage.setItem("sda_pubkey", pk);
+  } catch (e) {
+    $("rows").innerHTML = `<tr><td colspan="8"><div class="msg error">Failed to load: ${e}</div></td></tr>`;
+  } finally { $("load").disabled = false; }
+}
+
+async function refreshChain() {
+  const btn = $("refresh"); btn.disabled = true; const orig = btn.textContent; btn.textContent = "Refreshing…";
+  try { await fetch("/refresh", { method: "POST" }); setTimeout(load, 1500); }
+  catch {} finally { setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 1500); }
+}
+
+$("load").addEventListener("click", load);
+$("refresh").addEventListener("click", refreshChain);
+$("pubkey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+
+const saved = localStorage.getItem("sda_pubkey");
+if (saved) { $("pubkey").value = saved; load(); }
+checkHealth();
+setInterval(checkHealth, 15000);
+</script>
+</body>
+</html>
