@@ -194,7 +194,6 @@ async function load() {
     const txs = await r.json();
     render(txs, cluster);
     loadBalance(pk);
-    localStorage.setItem("sda_pubkey", pk);
   } catch (e) {
     $("rows").innerHTML = `<tr><td colspan="8"><div class="msg error">Failed to load: ${e}</div></td></tr>`;
   } finally { $("load").disabled = false; }
@@ -210,21 +209,18 @@ $("load").addEventListener("click", load);
 $("refresh").addEventListener("click", refreshChain);
 $("pubkey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
 
-// Populate the monitored-account picker from the backend, and default to the
-// first monitored account if nothing is saved.
+// Populate the monitored-account dropdown from the backend. The input is left
+// empty on purpose — pick a monitored account or paste one, then Load.
 async function loadAccounts() {
   try {
     const r = await fetch("/accounts");
     const accts = await r.json();
-    if (Array.isArray(accts) && accts.length) {
+    if (Array.isArray(accts)) {
       $("accounts-list").innerHTML = accts.map((a) => `<option value="${a}">`).join("");
-      if (!$("pubkey").value) { $("pubkey").value = accts[0]; load(); }
     }
   } catch {}
 }
 
-const saved = localStorage.getItem("sda_pubkey");
-if (saved) { $("pubkey").value = saved; load(); }
 loadAccounts();
 checkHealth();
 setInterval(checkHealth, 15000);
