@@ -44,8 +44,11 @@ jobs:
           if [ -n "$ct" ]; then
             ran=1
             cd "$(dirname "$ct")"
-            cargo build
-            cargo test
+            # --locked fails loudly on a stale/corrupt Cargo.lock (e.g. a mismatched
+            # dependency bump), instead of silently re-resolving and merging anyway.
+            cargo build --locked
+            cargo clippy --all-targets --locked -- -D warnings
+            cargo test --locked
             cd - >/dev/null
           fi
           if [ "$ran" = 0 ]; then echo "No recognized toolchain — nothing to check."; fi

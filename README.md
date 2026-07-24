@@ -67,9 +67,12 @@ Create a .env file in the root of the project directory:
 ```
 SOLANA_RPC_URL=https://api.testnet.solana.com
 SOLANA_PUBLIC_KEY=YourPublicKeyHere
+# Optional — defaults to 127.0.0.1:3030
+SERVER_ADDR=127.0.0.1:3030
 ```
 
-Replace YourPublicKeyHere with the public key you want to monitor.
+Replace YourPublicKeyHere with the public key you want to monitor. `SERVER_ADDR`
+is optional and controls the address the HTTP API binds to.
 
 ### Build the Project
 
@@ -97,19 +100,26 @@ You can query the transactions stored in the database using the API. Refer to th
 
 ### API Endpoints
 
-`GET /transactions`
-This endpoint retrieves transactions filtered by public key and optional date.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness probe; returns `{"status":"ok"}`. |
+| GET | `/transactions` | Stored transactions for a public key (see query params below). |
+| GET | `/transactions/{signature}` | A single stored transaction by its signature. |
+| GET | `/accounts/{pub_key}/balance` | Current lamport balance for an account, fetched live from the RPC. |
+| POST | `/refresh` | Triggers an out-of-band fetch of recent transactions for the monitored key. |
 
-### Query Parameters:
+#### `GET /transactions`
 
-- pub_key: The public key of the sender.
-- day (optional): Filter transactions by a specific day in dd/mm/yyyy format.
-- limit (optional): Limit the number of transactions returned (default is 5).
-- offset (optional): Offset for pagination.
+Retrieves stored transactions filtered by public key and optional date.
+
+**Query parameters:**
+
+- `pub_key`: The public key to fetch transactions for.
+- `day` (optional): Filter transactions by a specific day in `dd/mm/yyyy` format.
+- `limit` (optional): Limit the number of transactions returned (default is 5).
+- `offset` (optional): Offset for pagination.
 
 Example:
-
-To get transactions for a specific public key:
 
 ```
 curl "http://127.0.0.1:3030/transactions?pub_key=YourPublicKeyHere"

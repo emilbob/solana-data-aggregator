@@ -1,3 +1,4 @@
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -13,6 +14,16 @@ pub struct TransactionData {
     pub receiver: String,  // Public key of the receiver
     pub amount: u64,       // Amount transferred in the transaction
     pub timestamp: u64,    // Timestamp of the transaction
+}
+
+/// On-disk persistence record. Persisting the index key alongside the
+/// transaction keeps the reloaded in-memory keying identical to the keying used
+/// at runtime (previously reload re-keyed by `sender`, diverging from the
+/// monitored-address key used by `add_transaction`).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PersistedTx {
+    key: String,
+    tx: TransactionData,
 }
 
 /// An in-memory database that stores transaction data, with persistence capabilities.
@@ -51,52 +62,80 @@ impl InMemoryDatabase {
 
     /// Adds a new transaction to the in-memory database and saves it to a file.
     ///
+    /// Idempotent by signature: re-adding a transaction already stored under
+    /// `pub_key` is a no-op, so re-fetching the same transactions (every poll
+    /// cycle, and across restarts) neither duplicates in memory nor grows the
+    /// persistence file without bound. A non-fatal I/O error is logged, not
+    /// panicked — a disk hiccup must not take down the fetch loop.
+    ///
     /// # Arguments
     ///
-    /// * `pub_key` - The public key of the sender or receiver to associate with this transaction.
+    /// * `pub_key` - The public key this transaction is indexed under (the monitored account).
     /// * `transaction` - The transaction data to be added.
     pub async fn add_transaction(&self, pub_key: &str, transaction: TransactionData) {
         let mut transactions = self.transactions.lock().await;
-        transactions
-            .entry(pub_key.to_string())
-            .or_insert_with(Vec::new)
-            .push(transaction.clone());
+        let entry = transactions.entry(pub_key.to_string()).or_default();
+        if entry.iter().any(|t| t.signature == transaction.signature) {
+            return; // already stored — skip both the in-memory push and the file append
+        }
+        entry.push(transaction.clone());
+        drop(transactions); // release the lock before touching the filesystem
 
-        // Append the transaction to the text file for persistence
+        if let Err(e) = self.append_to_file(pub_key, &transaction) {
+            warn!(
+                "Failed to persist transaction {}: {}",
+                transaction.signature, e
+            );
+        }
+    }
+
+    /// Appends a single record to the persistence file. Returns any I/O or
+    /// serialization error to the caller rather than panicking.
+    fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
+        let record = PersistedTx {
+            key: key.to_string(),
+            tx: tx.clone(),
+        };
+        let serialized = serde_json::to_string(&record)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.file_path)
-            .expect("Unable to open file");
-
-        let serialized_transaction =
-            serde_json::to_string(&transaction).expect("Failed to serialize transaction");
-
-        writeln!(file, "{}", serialized_transaction).expect("Unable to write to file");
+            .open(&self.file_path)?;
+        writeln!(file, "{}", serialized)
     }
 
-    /// Loads transactions from a text file into the in-memory database.
+    /// Loads transactions from the persistence file into the in-memory database.
     ///
-    /// This method reads each line from the specified file and attempts to deserialize
-    /// it into a `TransactionData` struct. If successful, the transaction is added to
-    /// the in-memory database under the corresponding sender's public key.
+    /// Each line is a JSON [`PersistedTx`] record, so transactions are restored
+    /// under the same key they were stored with. Duplicates (by signature) are
+    /// skipped, so a file that accumulated repeats from an older build still
+    /// loads cleanly.
     pub async fn load_from_file(&self) {
-        if Path::new(&self.file_path).exists() {
-            let file = File::open(&self.file_path).expect("Unable to open file");
-            let reader = BufReader::new(file);
-            let mut transactions = self.transactions.lock().await;
+        if !Path::new(&self.file_path).exists() {
+            return;
+        }
+        let file = match File::open(&self.file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Unable to open persistence file {}: {}", self.file_path, e);
+                return;
+            }
+        };
+        let reader = BufReader::new(file);
+        let mut transactions = self.transactions.lock().await;
 
-            for line in reader.lines() {
-                if let Ok(transaction_str) = line {
-                    if let Ok(transaction) =
-                        serde_json::from_str::<TransactionData>(&transaction_str)
-                    {
-                        transactions
-                            .entry(transaction.sender.clone())
-                            .or_insert_with(Vec::new)
-                            .push(transaction);
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<PersistedTx>(&line) {
+                Ok(record) => {
+                    let entry = transactions.entry(record.key).or_default();
+                    if !entry.iter().any(|t| t.signature == record.tx.signature) {
+                        entry.push(record.tx);
                     }
                 }
+                Err(e) => warn!("Skipping malformed persistence line: {}", e),
             }
         }
     }
@@ -142,15 +181,13 @@ mod tests {
         assert_eq!(transactions[0], transaction);
     }
 
-    /// Test to verify that transactions can be loaded from a file into the in-memory database.
+    /// Round-trips a transaction through the persistence file: a transaction
+    /// added under a key must reload under that *same* key (not re-keyed by
+    /// sender), preserving runtime keying across restarts.
     #[tokio::test]
-    async fn test_load_from_file() {
-        // Ensure the file is clean before the test
-        std::fs::write("persistence_test_transactions.txt", "").expect("Failed to clear file");
-
-        let db = Arc::new(InMemoryDatabase::new(
-            "persistence_test_transactions.txt".to_string(),
-        ));
+    async fn test_persist_and_reload_round_trip() {
+        let path = "persistence_test_transactions.txt";
+        std::fs::write(path, "").expect("Failed to clear file");
 
         let transaction = TransactionData {
             signature: "persist_test_sig".to_string(),
@@ -160,21 +197,44 @@ mod tests {
             timestamp: 1628500000,
         };
 
-        // Write transaction directly to file
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("persistence_test_transactions.txt")
-            .expect("Unable to open file");
-        writeln!(file, "{}", serde_json::to_string(&transaction).unwrap())
-            .expect("Unable to write to file");
+        // First instance writes the transaction under the monitored-account key.
+        let db1 = Arc::new(InMemoryDatabase::new(path.to_string()));
+        db1.add_transaction("monitored_account", transaction.clone())
+            .await;
 
-        // Load from file
-        db.load_from_file().await;
+        // A fresh instance loads it back under the same key.
+        let db2 = Arc::new(InMemoryDatabase::new(path.to_string()));
+        db2.load_from_file().await;
 
-        // Check in-memory data
-        let transactions = db.get_transactions("persist_sender").await;
+        let transactions = db2.get_transactions("monitored_account").await;
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
+        // Not re-keyed by sender:
+        assert!(db2.get_transactions("persist_sender").await.is_empty());
+    }
+
+    /// Re-adding the same signature (per poll cycle / across restarts) must not
+    /// duplicate it in memory or grow the persistence file.
+    #[tokio::test]
+    async fn test_add_transaction_is_idempotent() {
+        let path = "idempotent_test_transactions.txt";
+        std::fs::write(path, "").expect("Failed to clear file");
+
+        let db = Arc::new(InMemoryDatabase::new(path.to_string()));
+        let transaction = TransactionData {
+            signature: "dup_sig".to_string(),
+            sender: "s".to_string(),
+            receiver: "r".to_string(),
+            amount: 1,
+            timestamp: 1628500000,
+        };
+
+        db.add_transaction("acct", transaction.clone()).await;
+        db.add_transaction("acct", transaction.clone()).await;
+        db.add_transaction("acct", transaction.clone()).await;
+
+        assert_eq!(db.get_transactions("acct").await.len(), 1);
+        let line_count = std::fs::read_to_string(path).unwrap().lines().count();
+        assert_eq!(line_count, 1, "duplicate adds must not grow the file");
     }
 }

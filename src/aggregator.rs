@@ -1,6 +1,6 @@
 use crate::db::{InMemoryDatabase, TransactionData};
-use log::{error, info};
-use solana_client::rpc_client::RpcClient;
+use log::info;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::{
@@ -69,6 +69,7 @@ impl Aggregator {
         let epoch_info = self
             .client
             .get_epoch_info()
+            .await
             .map_err(AggregatorError::FetchTransactionError)?;
 
         // Approximate time per Solana slot (in seconds)
@@ -81,6 +82,7 @@ impl Aggregator {
         let current_time = self
             .client
             .get_block_time(epoch_info.absolute_slot)
+            .await
             .map_err(AggregatorError::FetchTransactionError)?;
 
         Ok(current_time - seconds_since_epoch_start)
@@ -118,6 +120,7 @@ impl Aggregator {
             let signatures = self
                 .client
                 .get_signatures_for_address(&pubkey)
+                .await
                 .map_err(AggregatorError::FetchSignaturesError)?;
 
             info!(
@@ -139,6 +142,7 @@ impl Aggregator {
                 if let Ok(transaction_with_meta) = self
                     .client
                     .get_transaction(&signature, UiTransactionEncoding::JsonParsed)
+                    .await
                     .map_err(AggregatorError::FetchTransactionError)
                 {
                     if let Some(block_time) = transaction_with_meta.block_time {
@@ -146,57 +150,53 @@ impl Aggregator {
                         if block_time >= epoch_start_time {
                             let timestamp = block_time;
                             if let Some(meta) = &transaction_with_meta.transaction.meta {
-                                match &transaction_with_meta.transaction.transaction {
-                                    EncodedTransaction::Json(transaction) => {
-                                        let UiTransaction { message, .. } = transaction;
-                                        let (sender, receiver) = match message {
-                                            UiMessage::Parsed(parsed_message) => {
-                                                let sender = parsed_message
-                                                    .account_keys
-                                                    .get(0)
-                                                    .map_or("unknown".to_string(), |acc| {
-                                                        acc.pubkey.clone()
-                                                    });
-                                                let receiver = parsed_message
-                                                    .account_keys
-                                                    .get(1)
-                                                    .map_or("unknown".to_string(), |acc| {
-                                                        acc.pubkey.clone()
-                                                    });
-                                                (sender, receiver)
-                                            }
-                                            UiMessage::Raw(raw_message) => {
-                                                let sender = raw_message
-                                                    .account_keys
-                                                    .get(0)
-                                                    .map_or("unknown".to_string(), |key| {
-                                                        key.clone()
-                                                    });
-                                                let receiver = raw_message
-                                                    .account_keys
-                                                    .get(1)
-                                                    .map_or("unknown".to_string(), |key| {
-                                                        key.clone()
-                                                    });
-                                                (sender, receiver)
-                                            }
-                                        };
-                                        let amount = meta.post_balances[1] - meta.pre_balances[1];
+                                if let EncodedTransaction::Json(transaction) =
+                                    &transaction_with_meta.transaction.transaction
+                                {
+                                    let UiTransaction { message, .. } = transaction;
+                                    let (sender, receiver) = match message {
+                                        UiMessage::Parsed(parsed_message) => {
+                                            let sender = parsed_message
+                                                .account_keys
+                                                .first()
+                                                .map_or("unknown".to_string(), |acc| {
+                                                    acc.pubkey.clone()
+                                                });
+                                            let receiver = parsed_message
+                                                .account_keys
+                                                .get(1)
+                                                .map_or("unknown".to_string(), |acc| {
+                                                    acc.pubkey.clone()
+                                                });
+                                            (sender, receiver)
+                                        }
+                                        UiMessage::Raw(raw_message) => {
+                                            let sender = raw_message
+                                                .account_keys
+                                                .first()
+                                                .map_or("unknown".to_string(), |key| key.clone());
+                                            let receiver = raw_message
+                                                .account_keys
+                                                .get(1)
+                                                .map_or("unknown".to_string(), |key| key.clone());
+                                            (sender, receiver)
+                                        }
+                                    };
+                                    let amount =
+                                        balance_delta(&meta.pre_balances, &meta.post_balances);
 
-                                        let transaction_data = TransactionData {
-                                            signature: signature_info.signature.clone(),
-                                            sender,
-                                            receiver,
-                                            amount: amount as u64,
-                                            timestamp: timestamp as u64,
-                                        };
+                                    let transaction_data = TransactionData {
+                                        signature: signature_info.signature.clone(),
+                                        sender,
+                                        receiver,
+                                        amount,
+                                        timestamp: timestamp as u64,
+                                    };
 
-                                        transactions.push(transaction_data.clone());
+                                    transactions.push(transaction_data.clone());
 
-                                        // Save each transaction to the in-memory database
-                                        self.db.add_transaction(address, transaction_data).await;
-                                    }
-                                    _ => {}
+                                    // Save each transaction to the in-memory database
+                                    self.db.add_transaction(address, transaction_data).await;
                                 }
                             }
                         } else {
@@ -222,11 +222,38 @@ impl Aggregator {
     }
 }
 
+/// Lamport magnitude moved for account index 1, computed without panicking.
+///
+/// The previous `post_balances[1] - pre_balances[1]` had two bugs: it indexed
+/// `[1]` unchecked (panics on transactions with fewer than two accounts), and
+/// the `u64` subtraction underflowed for the common case where the balance
+/// *decreases* (panic in debug, silent wrap in release). Using a signed
+/// difference and taking the absolute value yields the transferred magnitude
+/// for either direction; a missing index yields 0.
+fn balance_delta(pre_balances: &[u64], post_balances: &[u64]) -> u64 {
+    match (pre_balances.get(1), post_balances.get(1)) {
+        (Some(&pre), Some(&post)) => (post as i64 - pre as i64).unsigned_abs(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
+    use super::balance_delta;
     use crate::db::{InMemoryDatabase, TransactionData};
     use std::sync::Arc;
+
+    #[test]
+    fn test_balance_delta_handles_decrease_and_missing_index() {
+        // Incoming: post > pre.
+        assert_eq!(balance_delta(&[10, 5], &[10, 12]), 7);
+        // Outgoing: post < pre — previously underflowed/panicked.
+        assert_eq!(balance_delta(&[10, 12], &[10, 5]), 7);
+        // Fewer than two accounts — previously indexed out of bounds.
+        assert_eq!(balance_delta(&[10], &[10]), 0);
+        assert_eq!(balance_delta(&[], &[]), 0);
+    }
 
     /// Test to verify that the `Aggregator` can add a transaction to the in-memory
     /// database and retrieve it correctly.
