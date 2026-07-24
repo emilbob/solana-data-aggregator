@@ -12,6 +12,7 @@ use solana_transaction_status::{
     EncodedTransaction, UiInstruction, UiMessage, UiParsedInstruction, UiTransaction,
     UiTransactionEncoding, UiTransactionStatusMeta,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -48,9 +49,10 @@ pub struct Aggregator {
     db: Arc<Store>,     // Storage backend (in-memory or Postgres)
     fetch_limit: usize, // Max signatures to pull per cycle (bounds the per-cycle work)
     timeout: Duration,  // Per-cycle budget for the signature + detail fetches
-    /// Newest signature ingested so far. Passed as `until` on the next cycle so
-    /// each poll fetches only *new* transactions instead of re-scanning history.
-    last_signature: Mutex<Option<Signature>>,
+    /// Newest signature ingested per monitored account. Passed as `until` on the
+    /// next cycle so each account resumes independently and only *new*
+    /// transactions are fetched instead of re-scanning history.
+    last_signatures: Mutex<HashMap<String, Signature>>,
 }
 
 impl Aggregator {
@@ -77,7 +79,7 @@ impl Aggregator {
             db,
             fetch_limit: fetch_limit.max(1),
             timeout: Duration::from_secs(timeout_secs.max(1)),
-            last_signature: Mutex::new(None),
+            last_signatures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -131,8 +133,9 @@ impl Aggregator {
         // Fetch the start time of the current epoch
         let epoch_start_time = self.get_epoch_start_time().await?;
 
-        // Only fetch what's newer than the last signature we ingested.
-        let until = *self.last_signature.lock().await;
+        // Only fetch what's newer than the last signature we ingested for this
+        // account.
+        let until = self.last_signatures.lock().await.get(address).copied();
 
         let (transactions, newest) = timeout(timeout_duration, async {
             let pubkey: Pubkey = address
@@ -187,9 +190,12 @@ impl Aggregator {
         })
         .await??;
 
-        // Advance the cursor only after a fully successful cycle.
+        // Advance this account's cursor only after a fully successful cycle.
         if let Some(sig) = newest {
-            *self.last_signature.lock().await = Some(sig);
+            self.last_signatures
+                .lock()
+                .await
+                .insert(address.to_string(), sig);
         }
 
         info!(
