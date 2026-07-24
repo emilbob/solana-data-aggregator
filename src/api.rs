@@ -24,7 +24,7 @@ use serde::Serialize;
 /// # Returns
 ///
 /// A warp filter that handles incoming HTTP requests to fetch transactions.
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use warp::filters::BoxedFilter;
 
 #[derive(Serialize)]
@@ -109,7 +109,7 @@ async fn handle_get_account_balance(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let client = RpcClient::new(rpc_url);
     match pub_key.parse() {
-        Ok(pubkey) => match client.get_balance(&pubkey) {
+        Ok(pubkey) => match client.get_balance(&pubkey).await {
             Ok(balance) => Ok(warp::reply::json(&BalanceResponse { pub_key, balance })),
             Err(e) => {
                 let error_message = warp::reply::json(&serde_json::json!({

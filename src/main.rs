@@ -51,16 +51,30 @@ async fn main() {
     info!("Starting Solana Data Aggregator...");
 
     // Set up a one-shot channel for shutdown signaling
-    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Create the API and bind it to the specified address
+    // Create the API and bind it to the configured address (SERVER_ADDR,
+    // default 127.0.0.1:3030).
     let api = create_api(db.clone(), rpc_url.clone(), refresh_callback);
-    let addr: SocketAddr = ([127, 0, 0, 1], 3030).into();
+    let addr: SocketAddr = env::var("SERVER_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| ([127, 0, 0, 1], 3030).into());
 
-    // Start the Warp server (spawned so we can abort it on shutdown)
-    let warp_server_task = tokio::spawn(async move {
-        warp::serve(api).run(addr).await;
+    // Start the Warp server with graceful shutdown wired to the oneshot: when
+    // `shutdown_tx` fires, warp stops accepting connections and drains in-flight
+    // requests instead of being killed mid-response.
+    let mut warp_server_task = tokio::spawn(async move {
+        warp::serve(api)
+            .bind(addr)
+            .await
+            .graceful(async move {
+                shutdown_rx.await.ok();
+            })
+            .run()
+            .await;
     });
+    info!("API listening on http://{}", addr);
 
     // Task to periodically fetch recent transactions from the Solana blockchain
     let fetch_task = tokio::spawn(async move {
@@ -91,17 +105,24 @@ async fn main() {
                 info!("Fetch task aborted");
             }
 
-            // Send a shutdown signal to the Warp server
+            // Signal the Warp server to drain and stop.
             let _ = shutdown_tx.send(());
             info!("Sent shutdown signal to Warp server");
 
-            // Wait for 5 seconds to complete shutdown; otherwise, force exit
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            info!("Forcing shutdown after timeout...");
-            std::process::exit(0); // Force shutdown
+            // Give in-flight requests up to 5s to drain, then force the issue.
+            match tokio::time::timeout(Duration::from_secs(5), &mut warp_server_task).await {
+                Ok(_) => info!("Warp server shut down cleanly."),
+                Err(_) => {
+                    warp_server_task.abort();
+                    info!("Warp shutdown timed out after 5s; aborted.");
+                }
+            }
         },
-        _ = warp_server_task => {
+        _ = &mut warp_server_task => {
             info!("Warp server task completed.");
+            if let Some(task) = fetch_task.take() {
+                task.abort();
+            }
         },
     }
 
