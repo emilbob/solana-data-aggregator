@@ -1,6 +1,6 @@
 # Solana Data Aggregator
 
-The Solana Data Aggregator is a Rust-based tool designed to collect, process, and store transaction data from the Solana blockchain. It supports real-time data retrieval, in-memory storage with persistence capabilities, and provides a RESTful API for querying transaction data.
+The Solana Data Aggregator is a Rust service that collects, decodes, and stores Solana transaction data and exposes it over a REST API and a built-in web dashboard. It monitors multiple accounts across multiple networks (mainnet/devnet/testnet, switchable from the UI), ingests in real time over WebSocket with polling as a backfill, stores to an in-memory+file store or Postgres, and ships as a small container that deploys anywhere.
 
 ## Table of Contents
 
@@ -19,6 +19,8 @@ The Solana Data Aggregator is a Rust-based tool designed to collect, process, an
 - Persistence
 - Testing
 - Design Decisions
+- Deployment
+  - Free live demo (Render)
 - Future Enhancements
 - Contributing
 - License
@@ -30,12 +32,13 @@ The Solana Data Aggregator is a tool that helps developers, researchers, and blo
 
 ## Features
 
-- Real-Time Data Retrieval: Continuously fetches the most recent transactions from the Solana blockchain.
-  In-Memory Database with Persistence: Stores transactions in memory for fast access, with periodic saving to a text file for persistence across restarts.
-
-- RESTful API: Exposes a simple API for querying transaction data by public key, date, and with pagination.
-  Graceful Shutdown: Handles shutdown signals cleanly, ensuring no data is lost.
-  Modular and Extensible Design: The codebase is modular, making it easy to extend and customize for different use cases.
+- **Multi-network, multi-account** — monitor a set of accounts across several clusters (mainnet/devnet/testnet); switch the live view from the dashboard.
+- **Real-time ingestion** — subscribes to transaction logs over WebSocket (with auto-reconnect); a bounded, incremental poll loop runs as a backfill safety net.
+- **Enriched decoding** — each transaction is decoded into `fee`, `fee_payer`, `success`, `slot`, a classified `tx_type`, invoked `programs`, real native-SOL `transfer` (incl. via CPI), and SPL `token_changes` (mint + amount) — not a transfer-biased guess.
+- **Pluggable storage** — zero-setup in-memory + file store by default, or durable/queryable **Postgres** by setting `DATABASE_URL`.
+- **REST API + web dashboard** — the same binary serves a JSON API and a self-contained dashboard at `/` (no Node, no build step).
+- **Observability & deploy** — Prometheus `/metrics`, a multi-stage non-root Docker image, `docker compose`, and a free Render blueprint; binds `$PORT` on cloud hosts.
+- **Robust by design** — idempotent storage, per-account cursors, graceful shutdown, and CI on every PR (`build`/`clippy -D warnings`/`test`, all `--locked`).
 
 ## Installation
 
@@ -158,8 +161,8 @@ You can query the transactions stored in the database using the API. Refer to th
 | GET | `/accounts` | Monitored accounts (optionally `?network=<name>`). |
 | GET | `/transactions` | Stored transactions for a public key (see query params below). |
 | GET | `/transactions/{signature}` | A single stored transaction by its signature. |
-| GET | `/accounts/{pub_key}/balance` | Current lamport balance for an account, fetched live from the RPC. |
-| POST | `/refresh` | Triggers an out-of-band fetch of recent transactions for the monitored key. |
+| GET | `/accounts/{pub_key}/balance` | Current lamport balance, fetched live from the RPC (optionally `?network=<name>`). |
+| POST | `/refresh` | Triggers an out-of-band fetch for every monitored account, on every network. |
 
 #### `GET /transactions`
 
@@ -168,6 +171,7 @@ Retrieves stored transactions filtered by public key and optional date.
 **Query parameters:**
 
 - `pub_key`: The public key to fetch transactions for.
+- `network` (optional): Which cluster to query; defaults to the first configured network.
 - `day` (optional): Filter transactions by a specific day in `dd/mm/yyyy` format.
 - `limit` (optional): Limit the number of transactions returned (default is 5).
 - `offset` (optional): Offset for pagination.
@@ -213,10 +217,13 @@ enriched record (not a transfer-biased guess):
 
 The project is organized into the following modules:
 
-- aggregator.rs: Handles the logic for fetching transactions from the Solana blockchain.
-- api.rs: Defines and implements the RESTful API for querying transactions.
-- db.rs: Implements an in-memory database with the ability to persist transactions to a text file.
-- main.rs: The entry point of the application. It initializes components, starts the server, and handles graceful shutdown.
+- `main.rs`: entry point — loads config (networks/accounts), picks the storage backend, spawns a poll loop + WebSocket task per network, starts the server, and handles graceful shutdown.
+- `aggregator.rs`: fetches and decodes transactions from an RPC (poll + WebSocket `logsSubscribe`), with per-account cursors.
+- `store.rs`: the `Store` abstraction — in-memory or Postgres (`PgStore`) — so the rest of the app is backend-agnostic.
+- `db.rs`: the in-memory store (+ file persistence) and the decoded `TransactionData` / `Transfer` / `TokenChange` types.
+- `api.rs`: the warp routes (REST endpoints + `/metrics`) and serving the dashboard at `/`.
+- `index.html`: the self-contained web dashboard, embedded into the binary via `include_str!`.
+- `migrations/`: SQL migrations for the Postgres backend, embedded and run at startup.
 
 ## Persistence
 
@@ -228,10 +235,10 @@ startup. Zero setup — good for local use and small datasets.
 
 **Postgres (set `DATABASE_URL`).** Durable, indexed, and queryable — the
 production path. On startup the app runs the migrations in `migrations/` and
-stores each transaction in a `transactions` table keyed by `(account,
-signature)` (idempotent via `ON CONFLICT DO NOTHING`), with the native SOL
-transfer flattened into `transfer_source/destination/lamports` columns so it can
-be filtered and summed in SQL.
+stores each transaction in a `transactions` table keyed by `(network, account,
+signature)` (idempotent via `ON CONFLICT DO NOTHING`). The native SOL transfer
+is flattened into `transfer_source/destination/lamports` columns (filterable and
+summable in SQL), and SPL `token_changes` are stored as JSON.
 
 A local Postgres is one command away via the included compose file:
 
