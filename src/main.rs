@@ -66,6 +66,9 @@ async fn main() {
     // Load environment variables from a .env file, if present
     dotenv().ok();
 
+    // Process start, for the uptime metric.
+    let started = std::time::Instant::now();
+
     // Retrieve the RPC URL from the environment.
     let rpc_url = require_env("SOLANA_RPC_URL");
 
@@ -177,6 +180,7 @@ async fn main() {
         db.clone(),
         rpc_url.clone(),
         pub_keys.clone(),
+        started,
         refresh_callback,
     );
     let addr: SocketAddr = env::var("SERVER_ADDR")

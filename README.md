@@ -144,6 +144,7 @@ You can query the transactions stored in the database using the API. Refer to th
 |---|---|---|
 | GET | `/` | Built-in web dashboard (self-contained HTML page). |
 | GET | `/health` | Liveness probe; returns `{"status":"ok"}`. |
+| GET | `/metrics` | Prometheus metrics (stored txs, monitored accounts, uptime). |
 | GET | `/accounts` | JSON list of the monitored accounts. |
 | GET | `/transactions` | Stored transactions for a public key (see query params below). |
 | GET | `/transactions/{signature}` | A single stored transaction by its signature. |
@@ -245,10 +246,45 @@ cargo test
 In-Memory Database with File Persistence: This design was chosen for its balance between performance and simplicity. The in-memory database allows for fast querying, while file persistence ensures data is not lost between sessions.
 Timeouts for Data Fetching: To prevent the application from hanging if the Solana network is slow or unresponsive, timeouts are used when fetching transactions.
 
+## Deployment
+
+The service ships as a single static binary with the dashboard and migrations
+embedded, so the container image is small and self-contained.
+
+**Docker image** (multi-stage build, runs as a non-root user):
+
+```
+docker build -t solana-data-aggregator .
+docker run -p 3030:3030 \
+  -e SOLANA_RPC_URL=https://api.testnet.solana.com \
+  -e SOLANA_PUBLIC_KEYS=Key1,Key2 \
+  solana-data-aggregator
+```
+
+The image sets `SERVER_ADDR=0.0.0.0:3030` so the API is reachable from outside
+the container.
+
+**Full stack** (app + Postgres) via the `app` compose profile:
+
+```
+docker compose --profile app up -d --build
+```
+
+This starts Postgres and the aggregator wired to it (`DATABASE_URL` points at the
+`postgres` service). Without `--profile app`, `docker compose up -d` starts only
+Postgres — handy for local `cargo run`.
+
+**Observability**: scrape `GET /metrics` (Prometheus format) and probe
+`GET /health` for liveness.
+
+**TLS & auth**: terminate TLS and enforce authentication at a reverse proxy
+(nginx/Traefik/Caddy) in front of the service — the standard pattern — rather
+than in the app. Keep the container on a private network and expose only the
+proxy.
+
 ## Future Enhancements
 
 SPL token & inner-instruction decoding: extract token transfer amounts/mints and CPI details, not just native SOL transfers.
-Deployment: a Dockerfile/image plus API auth, TLS, and metrics for running as a hosted service.
 
 ## Contributing
 

@@ -3,6 +3,7 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use log::{error, info};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Instant;
 use warp::Filter;
 
 /// Struct to define the query parameters for the API requests.
@@ -42,11 +43,13 @@ pub fn create_api(
     db: Arc<Store>,
     rpc_url: String,
     accounts: Vec<String>,
+    started: Instant,
     refresh_callback: Arc<dyn Fn() + Send + Sync>,
 ) -> BoxedFilter<(impl warp::Reply,)> {
     let db_filter = warp::any().map(move || db.clone());
     let rpc_url_filter = warp::any().map(move || rpc_url.clone());
     let accounts_filter = warp::any().map(move || accounts.clone());
+    let started_filter = warp::any().map(move || started);
     let refresh_callback_filter = warp::any().map(move || refresh_callback.clone());
 
     // Static dashboard (single self-contained page, embedded in the binary) at GET /
@@ -58,6 +61,14 @@ pub fn create_api(
     let health = warp::path("health")
         .and(warp::get())
         .map(|| warp::reply::json(&HealthResponse { status: "ok" }));
+
+    // /metrics endpoint (Prometheus text exposition)
+    let metrics = warp::path("metrics")
+        .and(warp::get())
+        .and(db_filter.clone())
+        .and(accounts_filter.clone())
+        .and(started_filter)
+        .and_then(handle_metrics);
 
     // /transactions (list)
     let transactions = warp::path("transactions")
@@ -96,12 +107,40 @@ pub fn create_api(
 
     index
         .or(health)
+        .or(metrics)
         .or(accounts_list)
         .or(transactions)
         .or(transaction_by_sig)
         .or(account_balance)
         .or(refresh)
         .boxed()
+}
+
+/// Handles GET /metrics — Prometheus text exposition of basic service metrics.
+async fn handle_metrics(
+    db: Arc<Store>,
+    accounts: Vec<String>,
+    started: Instant,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let total = db.count().await;
+    let uptime = started.elapsed().as_secs();
+    let body = format!(
+        "# HELP solana_aggregator_transactions_total Total transactions stored.\n\
+         # TYPE solana_aggregator_transactions_total gauge\n\
+         solana_aggregator_transactions_total {total}\n\
+         # HELP solana_aggregator_monitored_accounts Number of monitored accounts.\n\
+         # TYPE solana_aggregator_monitored_accounts gauge\n\
+         solana_aggregator_monitored_accounts {}\n\
+         # HELP solana_aggregator_uptime_seconds Seconds since the service started.\n\
+         # TYPE solana_aggregator_uptime_seconds counter\n\
+         solana_aggregator_uptime_seconds {uptime}\n",
+        accounts.len()
+    );
+    Ok(warp::reply::with_header(
+        body,
+        "content-type",
+        "text/plain; version=0.0.4",
+    ))
 }
 /// Handles GET /transactions/{signature}
 async fn handle_get_transaction_by_signature(
@@ -285,6 +324,7 @@ mod tests {
             db.clone(),
             "mock_rpc_url".to_string(),
             vec!["mock_sender_1".to_string(), "mock_sender_2".to_string()],
+            Instant::now(),
             Arc::new(|| {}),
         );
 

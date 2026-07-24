@@ -215,6 +215,12 @@ impl InMemoryDatabase {
         let transactions = self.transactions.lock().await;
         transactions.get(pub_key).cloned().unwrap_or_else(Vec::new)
     }
+
+    /// Total number of stored transactions across all accounts.
+    pub async fn count(&self) -> u64 {
+        let transactions = self.transactions.lock().await;
+        transactions.values().map(|v| v.len() as u64).sum()
+    }
 }
 
 #[cfg(test)]

@@ -58,6 +58,14 @@ impl Store {
             m.load_from_file().await;
         }
     }
+
+    /// Total number of stored transactions across all accounts.
+    pub async fn count(&self) -> u64 {
+        match self {
+            Store::Memory(m) => m.count().await,
+            Store::Postgres(p) => p.count().await,
+        }
+    }
 }
 
 /// Postgres-backed store. Idempotent by `(account, signature)`.
@@ -125,6 +133,13 @@ impl PgStore {
             .await
             .ok()??;
         Some(row_to_tx(&row))
+    }
+
+    async fn count(&self) -> u64 {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM transactions")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0) as u64
     }
 }
 
