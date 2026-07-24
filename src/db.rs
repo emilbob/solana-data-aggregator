@@ -18,19 +18,32 @@ pub struct Transfer {
     pub lamports: u64,
 }
 
+/// A net SPL token balance change for one token account, derived from the
+/// transaction's pre/post token balances — so it captures the real amount and
+/// mint regardless of how the transfer was structured (including via CPI).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TokenChange {
+    pub mint: String,
+    pub owner: String, // Owner of the token account ("" if the RPC didn't report it)
+    pub change: String, // Signed raw amount delta (e.g. "-1000000"); string to avoid precision loss
+    pub decimals: u8,
+    pub ui_change: f64, // `change` scaled by `decimals`
+}
+
 /// A decoded Solana transaction, enriched with the fields the RPC response
 /// actually carries rather than a transfer-biased guess.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TransactionData {
-    pub signature: String,          // Transaction signature
-    pub slot: u64,                  // Slot the transaction landed in
-    pub timestamp: u64,             // Block time (unix seconds)
-    pub fee: u64,                   // Fee paid, in lamports
-    pub fee_payer: String,          // The account that paid the fee (first signer)
-    pub success: bool,              // Whether the transaction succeeded (meta.err is None)
+    pub signature: String,               // Transaction signature
+    pub slot: u64,                       // Slot the transaction landed in
+    pub timestamp: u64,                  // Block time (unix seconds)
+    pub fee: u64,                        // Fee paid, in lamports
+    pub fee_payer: String,               // The account that paid the fee (first signer)
+    pub success: bool,                   // Whether the transaction succeeded (meta.err is None)
     pub tx_type: String, // Classified kind: "transfer" | "vote" | "token" | program | "unknown"
     pub programs: Vec<String>, // Programs the transaction invoked
     pub transfer: Option<Transfer>, // Present only when this is a native SOL transfer
+    pub token_changes: Vec<TokenChange>, // Net SPL token balance changes (empty if none)
 }
 
 impl TransactionData {
@@ -54,6 +67,9 @@ impl TransactionData {
                 short(&t.source),
                 short(&t.destination),
             ));
+        }
+        for tc in &self.token_changes {
+            s.push_str(&format!(" {:+} {}", tc.ui_change, short(&tc.mint)));
         }
         s
     }
@@ -244,6 +260,7 @@ mod tests {
                 destination: "dest".to_string(),
                 lamports: 100,
             }),
+            token_changes: vec![],
         }
     }
 

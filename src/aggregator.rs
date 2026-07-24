@@ -1,4 +1,4 @@
-use crate::db::{TransactionData, Transfer};
+use crate::db::{TokenChange, TransactionData, Transfer};
 use crate::store::Store;
 use futures::stream::StreamExt;
 use log::{info, warn};
@@ -11,7 +11,7 @@ use solana_sdk::signature::Signature;
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedTransaction, UiInstruction, UiMessage, UiParsedInstruction, UiTransaction,
-    UiTransactionEncoding, UiTransactionStatusMeta,
+    UiTransactionEncoding, UiTransactionTokenBalance,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -284,7 +284,8 @@ impl Aggregator {
         let UiTransaction { message, .. } = transaction;
 
         // Fee payer is the first account; programs invoked and any native SOL
-        // transfer come from the parsed instructions (we request JsonParsed).
+        // transfer come from the parsed instructions — top-level *and* inner
+        // (CPI) — so a program-initiated transfer isn't missed.
         let (fee_payer, programs, transfer) = match message {
             UiMessage::Parsed(m) => {
                 let fee_payer = m
@@ -293,22 +294,10 @@ impl Aggregator {
                     .map_or_else(|| "unknown".to_string(), |a| a.pubkey.clone());
                 let mut programs: Vec<String> = Vec::new();
                 let mut transfer = None;
-                for ix in &m.instructions {
-                    match ix {
-                        UiInstruction::Parsed(UiParsedInstruction::Parsed(p)) => {
-                            if !programs.contains(&p.program) {
-                                programs.push(p.program.clone());
-                            }
-                            if transfer.is_none() {
-                                transfer = parse_sol_transfer(&p.program, &p.parsed);
-                            }
-                        }
-                        UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(pd)) => {
-                            if !programs.contains(&pd.program_id) {
-                                programs.push(pd.program_id.clone());
-                            }
-                        }
-                        UiInstruction::Compiled(_) => {}
+                scan_instructions(&m.instructions, &mut programs, &mut transfer);
+                if let OptionSerializer::Some(inners) = &meta.inner_instructions {
+                    for inner in inners {
+                        scan_instructions(&inner.instructions, &mut programs, &mut transfer);
                     }
                 }
                 (fee_payer, programs, transfer)
@@ -322,7 +311,14 @@ impl Aggregator {
             }
         };
 
-        let tx_type = classify(&transfer, &programs, token_balances_present(meta));
+        // SPL token movements from the pre/post token balances — real amounts +
+        // mints, and CPI-agnostic (the balances reflect the net effect).
+        let token_changes = token_changes_from(
+            &token_bals(&meta.pre_token_balances),
+            &token_bals(&meta.post_token_balances),
+        );
+
+        let tx_type = classify(&transfer, &programs, !token_changes.is_empty());
 
         Some(TransactionData {
             signature: sig_str,
@@ -334,7 +330,35 @@ impl Aggregator {
             tx_type,
             programs,
             transfer,
+            token_changes,
         })
+    }
+}
+
+/// Collects program names and the first native SOL transfer from a slice of
+/// (possibly inner) parsed instructions.
+fn scan_instructions(
+    instructions: &[UiInstruction],
+    programs: &mut Vec<String>,
+    transfer: &mut Option<Transfer>,
+) {
+    for ix in instructions {
+        match ix {
+            UiInstruction::Parsed(UiParsedInstruction::Parsed(p)) => {
+                if !programs.contains(&p.program) {
+                    programs.push(p.program.clone());
+                }
+                if transfer.is_none() {
+                    *transfer = parse_sol_transfer(&p.program, &p.parsed);
+                }
+            }
+            UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(pd)) => {
+                if !programs.contains(&pd.program_id) {
+                    programs.push(pd.program_id.clone());
+                }
+            }
+            UiInstruction::Compiled(_) => {}
+        }
     }
 }
 
@@ -353,12 +377,70 @@ fn parse_sol_transfer(program: &str, parsed: &serde_json::Value) -> Option<Trans
     })
 }
 
-/// True if the transaction touched any SPL token balances.
-fn token_balances_present(meta: &UiTransactionStatusMeta) -> bool {
-    fn non_empty<T>(o: &OptionSerializer<Vec<T>>) -> bool {
-        matches!(o, OptionSerializer::Some(v) if !v.is_empty())
+/// A token account's balance at one point in time (pre or post).
+struct TokenBal {
+    account_index: u8,
+    mint: String,
+    owner: String,
+    amount: i128,
+    decimals: u8,
+}
+
+/// Extracts token balances from a meta field, parsing the raw string amount.
+fn token_bals(balances: &OptionSerializer<Vec<UiTransactionTokenBalance>>) -> Vec<TokenBal> {
+    let list: &[UiTransactionTokenBalance] = match balances {
+        OptionSerializer::Some(v) => v,
+        _ => &[],
+    };
+    list.iter()
+        .filter_map(|b| {
+            Some(TokenBal {
+                account_index: b.account_index,
+                mint: b.mint.clone(),
+                owner: match &b.owner {
+                    OptionSerializer::Some(o) => o.clone(),
+                    _ => String::new(),
+                },
+                amount: b.ui_token_amount.amount.parse::<i128>().ok()?,
+                decimals: b.ui_token_amount.decimals,
+            })
+        })
+        .collect()
+}
+
+/// Computes net token balance changes by diffing pre/post balances per token
+/// account (`account_index`). Only non-zero changes are emitted.
+fn token_changes_from(pre: &[TokenBal], post: &[TokenBal]) -> Vec<TokenChange> {
+    use std::collections::BTreeMap;
+    // account_index -> (mint, owner, decimals, pre_amount, post_amount)
+    let mut acc: BTreeMap<u8, (String, String, u8, i128, i128)> = BTreeMap::new();
+    for b in pre {
+        let e = acc
+            .entry(b.account_index)
+            .or_insert_with(|| (b.mint.clone(), b.owner.clone(), b.decimals, 0, 0));
+        e.3 = b.amount;
     }
-    non_empty(&meta.pre_token_balances) || non_empty(&meta.post_token_balances)
+    for b in post {
+        let e = acc
+            .entry(b.account_index)
+            .or_insert_with(|| (b.mint.clone(), b.owner.clone(), b.decimals, 0, 0));
+        e.0 = b.mint.clone();
+        e.1 = b.owner.clone();
+        e.2 = b.decimals;
+        e.4 = b.amount;
+    }
+    acc.into_values()
+        .filter_map(|(mint, owner, decimals, pre_amt, post_amt)| {
+            let change = post_amt - pre_amt;
+            (change != 0).then(|| TokenChange {
+                mint,
+                owner,
+                change: change.to_string(),
+                decimals,
+                ui_change: change as f64 / 10f64.powi(decimals as i32),
+            })
+        })
+        .collect()
 }
 
 /// Classifies a transaction: a real SOL transfer wins; then vote; then token;
@@ -381,9 +463,37 @@ fn classify(transfer: &Option<Transfer>, programs: &[String], has_tokens: bool) 
 #[cfg(test)]
 mod tests {
 
-    use super::{classify, parse_sol_transfer};
+    use super::{classify, parse_sol_transfer, token_changes_from, TokenBal};
     use crate::db::{InMemoryDatabase, TransactionData, Transfer};
     use std::sync::Arc;
+
+    fn bal(idx: u8, mint: &str, amount: i128) -> TokenBal {
+        TokenBal {
+            account_index: idx,
+            mint: mint.to_string(),
+            owner: "owner".to_string(),
+            amount,
+            decimals: 6,
+        }
+    }
+
+    #[test]
+    fn test_token_changes_diffs_pre_post() {
+        // Account 1 sends 1.5 tokens (−1_500_000), account 2 receives them.
+        let pre = vec![bal(1, "MINT", 2_000_000), bal(2, "MINT", 0)];
+        let post = vec![bal(1, "MINT", 500_000), bal(2, "MINT", 1_500_000)];
+        let changes = token_changes_from(&pre, &post);
+        assert_eq!(changes.len(), 2);
+        // Ordered by account_index (BTreeMap): index 1 first.
+        assert_eq!(changes[0].change, "-1500000");
+        assert_eq!(changes[0].ui_change, -1.5);
+        assert_eq!(changes[0].mint, "MINT");
+        assert_eq!(changes[1].change, "1500000");
+        assert_eq!(changes[1].ui_change, 1.5);
+        // Unchanged balances produce no entry.
+        let same = vec![bal(1, "MINT", 100)];
+        assert!(token_changes_from(&same, &same).is_empty());
+    }
 
     #[test]
     fn test_parse_sol_transfer_extracts_real_amount() {
@@ -443,6 +553,7 @@ mod tests {
                 destination: "receiver1".to_string(),
                 lamports: 100,
             }),
+            token_changes: vec![],
         };
 
         db.add_transaction("sender1", transaction.clone()).await;
