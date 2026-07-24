@@ -285,6 +285,25 @@ Postgres — handy for local `cargo run`.
 **Observability**: scrape `GET /metrics` (Prometheus format) and probe
 `GET /health` for liveness.
 
+### Free live demo (Render)
+
+`render.yaml` deploys a **free**, in-memory (no database) instance from the
+Dockerfile — enough to show it working and link from a site. The app binds to
+Render's injected `$PORT` automatically.
+
+1. Push to GitHub, then on [render.com](https://render.com): **New → Blueprint**,
+   pick the repo. Render reads `render.yaml` and creates the web service.
+2. In the service's **Environment**, set the values marked "set in dashboard":
+   `SOLANA_RPC_URL` (a Helius URL avoids public-RPC rate limits) and
+   `SOLANA_PUBLIC_KEYS` (account(s) to monitor). Deploy.
+3. You get `https://<name>.onrender.com` — the dashboard is at `/`. Link or
+   `<iframe>` it from your website.
+
+Caveats of the free plan: the service **sleeps after ~15 min idle**, so the
+first visit cold-starts (~30–60s); and with no database the store is in-memory,
+so data is rebuilt live on each start. Both are fine for a demo. For an
+always-on, durable deployment use a paid container host + `DATABASE_URL`.
+
 **TLS & auth**: terminate TLS and enforce authentication at a reverse proxy
 (nginx/Traefik/Caddy) in front of the service — the standard pattern — rather
 than in the app. Keep the container on a private network and expose only the

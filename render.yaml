@@ -1,0 +1,31 @@
+# Render Blueprint — free, in-memory (no database) live demo.
+# https://render.com/docs/blueprint-spec
+#
+# Render injects PORT and expects the app to bind 0.0.0.0:$PORT (handled in
+# main.rs). No DATABASE_URL → the in-memory store is used, which is all a demo
+# needs. Set the account(s) and RPC in the Render dashboard (marked sync:false)
+# so no specific values live in this committed file.
+services:
+  - type: web
+    name: solana-data-aggregator
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Set these in the Render dashboard after creating the service:
+      - key: SOLANA_RPC_URL      # e.g. a Helius URL (avoids public rate limits)
+        sync: false
+      - key: SOLANA_PUBLIC_KEYS  # comma-separated account(s) to monitor
+        sync: false
+      - key: SOLANA_WS_URL       # optional; defaults to SOLANA_RPC_URL with ws(s)
+        sync: false
+      # Sensible demo defaults (safe to keep in the file):
+      - key: WEBSOCKET
+        value: "true"
+      - key: FETCH_LIMIT
+        value: "5"
+      - key: POLL_TIMEOUT_SECS
+        value: "30"
+      - key: RUST_LOG
+        value: info
