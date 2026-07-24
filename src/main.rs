@@ -1,16 +1,17 @@
 mod aggregator;
 mod api;
 mod db;
+mod store;
 
 use aggregator::Aggregator;
 use api::create_api;
-use db::InMemoryDatabase;
 use dotenv::dotenv;
 use env_logger::Env;
 use log::{error, info};
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use store::Store;
 use tokio::signal;
 use tokio::time::Duration;
 
@@ -51,11 +52,29 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
 
-    // Initialize the in-memory database with a file path for persistence
-    let db = Arc::new(InMemoryDatabase::new("transactions.txt".to_string()));
+    // Select the storage backend: Postgres when DATABASE_URL is set (durable,
+    // queryable, multi-run history), otherwise the zero-setup in-memory + file
+    // store. The rest of the app is backend-agnostic.
+    let store = match env::var("DATABASE_URL") {
+        Ok(url) => match Store::connect_postgres(&url).await {
+            Ok(s) => {
+                info!("Using Postgres store");
+                s
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
+        Err(_) => {
+            info!("Using in-memory store (set DATABASE_URL to use Postgres)");
+            Store::memory("transactions.txt")
+        }
+    };
+    let db = Arc::new(store);
 
-    // Load data from the file into the in-memory database
-    db.load_from_file().await;
+    // Load any persisted data (no-op for Postgres — already durable).
+    db.load().await;
 
     // Initialize the aggregator with the RPC URL and the database reference. It
     // uses interior mutability for its cursor, so no outer Mutex is needed — the

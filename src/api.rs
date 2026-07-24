@@ -1,4 +1,4 @@
-use crate::db::InMemoryDatabase;
+use crate::store::Store;
 use chrono::{NaiveDate, TimeZone, Utc};
 use log::{error, info};
 use serde::Deserialize;
@@ -19,7 +19,7 @@ use serde::Serialize;
 ///
 /// # Arguments
 ///
-/// * `db` - A thread-safe reference to an `InMemoryDatabase`.
+/// * `db` - A thread-safe reference to the storage backend.
 ///
 /// # Returns
 ///
@@ -39,7 +39,7 @@ struct BalanceResponse {
 }
 
 pub fn create_api(
-    db: Arc<InMemoryDatabase>,
+    db: Arc<Store>,
     rpc_url: String,
     refresh_callback: Arc<dyn Fn() + Send + Sync>,
 ) -> BoxedFilter<(impl warp::Reply,)> {
@@ -96,7 +96,7 @@ pub fn create_api(
 /// Handles GET /transactions/{signature}
 async fn handle_get_transaction_by_signature(
     signature: String,
-    db: Arc<InMemoryDatabase>,
+    db: Arc<Store>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     if let Some(tx) = db.get_transaction_by_signature(&signature).await {
         Ok(warp::reply::json(&tx))
@@ -138,14 +138,14 @@ async fn handle_get_account_balance(
 /// # Arguments
 ///
 /// * `params` - The query parameters provided by the client.
-/// * `db` - A thread-safe reference to an `InMemoryDatabase`.
+/// * `db` - A thread-safe reference to the storage backend.
 ///
 /// # Returns
 ///
 /// A JSON response containing the filtered transactions or an error message.
 async fn handle_get_transactions(
     params: TransactionQueryParams,
-    db: Arc<InMemoryDatabase>,
+    db: Arc<Store>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     info!("Received request for public key: {}", params.pub_key);
 
@@ -226,15 +226,14 @@ fn is_same_day(timestamp: u64, date: NaiveDate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{InMemoryDatabase, TransactionData, Transfer};
+    use crate::db::{TransactionData, Transfer};
+    use crate::store::Store;
     use warp::test::request;
 
     /// Test to verify that the API correctly handles fetching transactions with mock data.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_api_get_transactions_with_mock_data() {
-        let db = Arc::new(InMemoryDatabase::new(
-            "mock_test_transactions.txt".to_string(),
-        ));
+        let db = Arc::new(Store::memory("mock_test_transactions.txt"));
 
         // Mock some transaction data
         let transaction1 = TransactionData {
