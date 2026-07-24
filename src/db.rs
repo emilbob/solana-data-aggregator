@@ -1,9 +1,10 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// Represents a transaction on the Solana blockchain.
@@ -81,7 +82,7 @@ impl InMemoryDatabase {
         entry.push(transaction.clone());
         drop(transactions); // release the lock before touching the filesystem
 
-        if let Err(e) = self.append_to_file(pub_key, &transaction) {
+        if let Err(e) = self.append_to_file(pub_key, &transaction).await {
             warn!(
                 "Failed to persist transaction {}: {}",
                 transaction.signature, e
@@ -89,19 +90,22 @@ impl InMemoryDatabase {
         }
     }
 
-    /// Appends a single record to the persistence file. Returns any I/O or
-    /// serialization error to the caller rather than panicking.
-    fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
+    /// Appends a single record to the persistence file without blocking the
+    /// async runtime. Returns any I/O or serialization error to the caller
+    /// rather than panicking.
+    async fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
         let record = PersistedTx {
             key: key.to_string(),
             tx: tx.clone(),
         };
-        let serialized = serde_json::to_string(&record)?;
-        let mut file = OpenOptions::new()
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.file_path)?;
-        writeln!(file, "{}", serialized)
+            .open(&self.file_path)
+            .await?;
+        file.write_all(line.as_bytes()).await
     }
 
     /// Loads transactions from the persistence file into the in-memory database.

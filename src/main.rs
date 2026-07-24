@@ -12,8 +12,18 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
-use tokio::sync::Mutex;
 use tokio::time::Duration;
+
+/// Reads a required env var, exiting with a clear message instead of panicking.
+fn require_env(key: &str) -> String {
+    match env::var(key) {
+        Ok(val) => val,
+        Err(_) => {
+            eprintln!("error: {key} must be set (see README / .env)");
+            std::process::exit(1);
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -24,8 +34,15 @@ async fn main() {
     dotenv().ok();
 
     // Retrieve the RPC URL and public key from environment variables
-    let rpc_url = env::var("SOLANA_RPC_URL").expect("SOLANA_RPC_URL must be set");
-    let pub_key = env::var("SOLANA_PUBLIC_KEY").expect("SOLANA_PUBLIC_KEY must be set");
+    let rpc_url = require_env("SOLANA_RPC_URL");
+    let pub_key = require_env("SOLANA_PUBLIC_KEY");
+
+    // Max signatures to pull per fetch cycle (optional; default 20). Keeping this
+    // bounded is what stops a busy account from blowing the per-cycle timeout.
+    let fetch_limit: usize = env::var("FETCH_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
 
     // Initialize the in-memory database with a file path for persistence
     let db = Arc::new(InMemoryDatabase::new("transactions.txt".to_string()));
@@ -33,8 +50,10 @@ async fn main() {
     // Load data from the file into the in-memory database
     db.load_from_file().await;
 
-    // Initialize the aggregator with the RPC URL and the database reference
-    let aggregator = Arc::new(Mutex::new(Aggregator::new(&rpc_url, db.clone())));
+    // Initialize the aggregator with the RPC URL and the database reference. It
+    // uses interior mutability for its cursor, so no outer Mutex is needed — the
+    // poll loop and an on-demand /refresh can run concurrently.
+    let aggregator = Arc::new(Aggregator::new(&rpc_url, db.clone(), fetch_limit));
 
     // Refresh callback for /refresh endpoint
     let aggregator_clone = aggregator.clone();
@@ -43,8 +62,7 @@ async fn main() {
         let aggregator = aggregator_clone.clone();
         let pub_key = pub_key_clone.clone();
         tokio::spawn(async move {
-            let locked_aggregator = aggregator.lock().await;
-            let _ = locked_aggregator.fetch_recent_transactions(&pub_key).await;
+            let _ = aggregator.fetch_recent_transactions(&pub_key).await;
         });
     });
 
@@ -79,13 +97,8 @@ async fn main() {
     // Task to periodically fetch recent transactions from the Solana blockchain
     let fetch_task = tokio::spawn(async move {
         loop {
-            let locked_aggregator = aggregator.lock().await;
-            match locked_aggregator.fetch_recent_transactions(&pub_key).await {
-                Ok(transactions) => {
-                    let limited_transactions =
-                        &transactions[..std::cmp::min(5, transactions.len())];
-                    info!("Fetched {} transactions", limited_transactions.len());
-                }
+            match aggregator.fetch_recent_transactions(&pub_key).await {
+                Ok(transactions) => info!("Fetched {} new transactions", transactions.len()),
                 Err(err) => error!("Error fetching transactions: {:?}", err),
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
