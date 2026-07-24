@@ -26,6 +26,27 @@ fn require_env(key: &str) -> String {
     }
 }
 
+/// Collects the monitored accounts from `SOLANA_PUBLIC_KEYS` (comma-separated)
+/// and/or the single `SOLANA_PUBLIC_KEY`, de-duplicated and order-preserving.
+fn collect_accounts(single: Option<String>, multi: Option<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() && !out.iter().any(|e| e == s) {
+            out.push(s.to_string());
+        }
+    };
+    if let Some(m) = multi {
+        for k in m.split(',') {
+            push(k);
+        }
+    }
+    if let Some(s) = single {
+        push(&s);
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize the logger from environment variables, defaulting to "info" level
@@ -34,9 +55,24 @@ async fn main() {
     // Load environment variables from a .env file, if present
     dotenv().ok();
 
-    // Retrieve the RPC URL and public key from environment variables
+    // Retrieve the RPC URL from the environment.
     let rpc_url = require_env("SOLANA_RPC_URL");
-    let pub_key = require_env("SOLANA_PUBLIC_KEY");
+
+    // Monitored accounts: SOLANA_PUBLIC_KEYS (comma-separated) and/or the single
+    // SOLANA_PUBLIC_KEY. At least one is required.
+    let pub_keys = collect_accounts(
+        env::var("SOLANA_PUBLIC_KEY").ok(),
+        env::var("SOLANA_PUBLIC_KEYS").ok(),
+    );
+    if pub_keys.is_empty() {
+        eprintln!("error: set SOLANA_PUBLIC_KEY or SOLANA_PUBLIC_KEYS (see README / .env)");
+        std::process::exit(1);
+    }
+    info!(
+        "Monitoring {} account(s): {}",
+        pub_keys.len(),
+        pub_keys.join(", ")
+    );
 
     // Max signatures to pull per fetch cycle (optional; default 20). Keeping this
     // bounded is what stops a busy account from blowing the per-cycle timeout.
@@ -86,14 +122,16 @@ async fn main() {
         poll_timeout_secs,
     ));
 
-    // Refresh callback for /refresh endpoint
+    // Refresh callback for /refresh endpoint — refreshes every monitored account.
     let aggregator_clone = aggregator.clone();
-    let pub_key_clone = pub_key.clone();
+    let refresh_keys = pub_keys.clone();
     let refresh_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let aggregator = aggregator_clone.clone();
-        let pub_key = pub_key_clone.clone();
+        let keys = refresh_keys.clone();
         tokio::spawn(async move {
-            let _ = aggregator.fetch_recent_transactions(&pub_key).await;
+            for key in &keys {
+                let _ = aggregator.fetch_recent_transactions(key).await;
+            }
         });
     });
 
@@ -104,7 +142,12 @@ async fn main() {
 
     // Create the API and bind it to the configured address (SERVER_ADDR,
     // default 127.0.0.1:3030).
-    let api = create_api(db.clone(), rpc_url.clone(), refresh_callback);
+    let api = create_api(
+        db.clone(),
+        rpc_url.clone(),
+        pub_keys.clone(),
+        refresh_callback,
+    );
     let addr: SocketAddr = env::var("SERVER_ADDR")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -125,12 +168,21 @@ async fn main() {
     });
     info!("API listening on http://{}", addr);
 
-    // Task to periodically fetch recent transactions from the Solana blockchain
+    // Task to periodically fetch recent transactions for every monitored account.
+    let poll_keys = pub_keys.clone();
     let fetch_task = tokio::spawn(async move {
         loop {
-            match aggregator.fetch_recent_transactions(&pub_key).await {
-                Ok(transactions) => info!("Fetched {} new transactions", transactions.len()),
-                Err(err) => error!("Error fetching transactions: {:?}", err),
+            for key in &poll_keys {
+                match aggregator.fetch_recent_transactions(key).await {
+                    Ok(transactions) => {
+                        info!(
+                            "Fetched {} new transactions for {}",
+                            transactions.len(),
+                            key
+                        )
+                    }
+                    Err(err) => error!("Error fetching transactions for {}: {:?}", key, err),
+                }
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -171,4 +223,30 @@ async fn main() {
     }
 
     info!("Shutdown process finished.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_accounts;
+
+    #[test]
+    fn collect_accounts_merges_dedups_and_trims() {
+        // Multi (comma) first, then single appended; trimmed, blanks dropped,
+        // duplicates removed, order preserved.
+        assert_eq!(
+            collect_accounts(Some(" A ".to_string()), Some("B, C ,B,".to_string())),
+            vec!["B", "C", "A"]
+        );
+        assert_eq!(collect_accounts(Some("X".to_string()), None), vec!["X"]);
+        assert_eq!(
+            collect_accounts(None, Some("X,Y".to_string())),
+            vec!["X", "Y"]
+        );
+        assert!(collect_accounts(None, None).is_empty());
+        // De-dup across single + multi.
+        assert_eq!(
+            collect_accounts(Some("A".to_string()), Some("A".to_string())),
+            vec!["A"]
+        );
+    }
 }

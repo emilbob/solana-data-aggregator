@@ -41,10 +41,12 @@ struct BalanceResponse {
 pub fn create_api(
     db: Arc<Store>,
     rpc_url: String,
+    accounts: Vec<String>,
     refresh_callback: Arc<dyn Fn() + Send + Sync>,
 ) -> BoxedFilter<(impl warp::Reply,)> {
     let db_filter = warp::any().map(move || db.clone());
     let rpc_url_filter = warp::any().map(move || rpc_url.clone());
+    let accounts_filter = warp::any().map(move || accounts.clone());
     let refresh_callback_filter = warp::any().map(move || refresh_callback.clone());
 
     // Static dashboard (single self-contained page, embedded in the binary) at GET /
@@ -70,6 +72,13 @@ pub fn create_api(
         .and(db_filter.clone())
         .and_then(handle_get_transaction_by_signature);
 
+    // /accounts (list monitored accounts)
+    let accounts_list = warp::path("accounts")
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(accounts_filter.clone())
+        .map(|accounts: Vec<String>| warp::reply::json(&accounts));
+
     // /accounts/{pub_key}/balance
     let account_balance = warp::path!("accounts" / String / "balance")
         .and(warp::get())
@@ -87,6 +96,7 @@ pub fn create_api(
 
     index
         .or(health)
+        .or(accounts_list)
         .or(transactions)
         .or(transaction_by_sig)
         .or(account_balance)
@@ -271,7 +281,12 @@ mod tests {
             .await;
 
         // Create the API with the mocked database, dummy rpc_url, and no-op refresh callback
-        let api = create_api(db.clone(), "mock_rpc_url".to_string(), Arc::new(|| {}));
+        let api = create_api(
+            db.clone(),
+            "mock_rpc_url".to_string(),
+            vec!["mock_sender_1".to_string(), "mock_sender_2".to_string()],
+            Arc::new(|| {}),
+        );
 
         // Query the API for the first transaction
         let response1 = request()

@@ -67,6 +67,8 @@ Create a .env file in the root of the project directory:
 ```
 SOLANA_RPC_URL=https://api.testnet.solana.com
 SOLANA_PUBLIC_KEY=YourPublicKeyHere
+# Optional — monitor several accounts (comma-separated); merged with SOLANA_PUBLIC_KEY
+# SOLANA_PUBLIC_KEYS=Key1,Key2,Key3
 # Optional — defaults to 127.0.0.1:3030
 SERVER_ADDR=127.0.0.1:3030
 # Optional — max signatures pulled per fetch cycle (default 20)
@@ -79,6 +81,10 @@ POLL_TIMEOUT_SECS=10
 
 Replace YourPublicKeyHere with the public key you want to monitor.
 
+- `SOLANA_PUBLIC_KEY` / `SOLANA_PUBLIC_KEYS` — the account(s) to monitor. Use
+  `SOLANA_PUBLIC_KEYS` (comma-separated) to watch several at once; the two are
+  merged and de-duplicated, and at least one is required. Each account is polled
+  independently (its own cursor) and stored/queried under its own key.
 - `SERVER_ADDR` (optional) — the address the HTTP API binds to.
 - `FETCH_LIMIT` (optional, default `20`) — how many recent signatures to pull
   each cycle. Each cycle fetches only transactions newer than the last one it
@@ -128,6 +134,7 @@ You can query the transactions stored in the database using the API. Refer to th
 |---|---|---|
 | GET | `/` | Built-in web dashboard (self-contained HTML page). |
 | GET | `/health` | Liveness probe; returns `{"status":"ok"}`. |
+| GET | `/accounts` | JSON list of the monitored accounts. |
 | GET | `/transactions` | Stored transactions for a public key (see query params below). |
 | GET | `/transactions/{signature}` | A single stored transaction by its signature. |
 | GET | `/accounts/{pub_key}/balance` | Current lamport balance for an account, fetched live from the RPC. |
@@ -230,9 +237,9 @@ Timeouts for Data Fetching: To prevent the application from hanging if the Solan
 
 ## Future Enhancements
 
-Support for Multiple Public Keys: Enable the aggregator to monitor multiple public keys simultaneously.
-Dockerization: Provide a Dockerfile to containerize the application for easier deployment.
-Enhanced Error Handling: Improve the robustness of error handling across the application.
+Real-time ingestion: subscribe to account activity over WebSocket/Geyser instead of polling, to eliminate gaps on high-volume accounts.
+SPL token & inner-instruction decoding: extract token transfer amounts/mints and CPI details, not just native SOL transfers.
+Dockerization: provide a Dockerfile to containerize the application for easier deployment.
 
 ## Contributing
 
