@@ -108,7 +108,7 @@
   <div class="tablewrap">
     <table>
       <thead><tr>
-        <th>Type</th><th>Status</th><th>Fee</th><th>Fee payer</th><th>Slot</th><th>Transfer</th><th>Time</th><th>Signature</th>
+        <th>Type</th><th>Status</th><th>Fee</th><th>Fee payer</th><th>Slot</th><th>Transfer / tokens</th><th>Time</th><th>Signature</th>
       </tr></thead>
       <tbody id="rows"><tr><td colspan="8"><div class="msg">Enter a public key and press <b>Load</b>.</div></td></tr></tbody>
     </table>
@@ -155,9 +155,16 @@ function render(txs, cluster) {
     const tr = t.transfer;
     if (tr) totalTransfer += tr.lamports || 0;
     const when = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString() : "—";
-    const transferCell = tr
-      ? `<span class="transfer-cell">${sol(tr.lamports)}<br><span class="muted">${short(tr.source)} <span class="arrow">→</span> ${short(tr.destination)}</span></span>`
-      : `<span class="muted">—</span>`;
+    const parts = [];
+    if (tr) {
+      parts.push(`<span class="transfer-cell">${sol(tr.lamports)}<br><span class="muted">${short(tr.source)} <span class="arrow">→</span> ${short(tr.destination)}</span></span>`);
+    }
+    for (const tc of (t.token_changes || [])) {
+      const amt = tc.ui_change > 0 ? `+${tc.ui_change}` : `${tc.ui_change}`;
+      const cls = tc.ui_change >= 0 ? "status-ok" : "status-fail";
+      parts.push(`<span class="transfer-cell"><span class="${cls}">${amt}</span> <span class="muted">${short(tc.mint)}</span></span>`);
+    }
+    const transferCell = parts.length ? parts.join("<br>") : `<span class="muted">—</span>`;
     const url = `https://explorer.solana.com/tx/${t.signature}?cluster=${cluster}`;
     return `<tr>
       <td><span class="badge ${badgeClass(t.tx_type)}">${t.tx_type}</span></td>

@@ -1,4 +1,4 @@
-use crate::db::{InMemoryDatabase, TransactionData, Transfer};
+use crate::db::{InMemoryDatabase, TokenChange, TransactionData, Transfer};
 use log::warn;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::Row;
@@ -83,11 +83,13 @@ impl PgStore {
             ),
             None => (None, None, None),
         };
+        let token_changes =
+            serde_json::to_string(&tx.token_changes).unwrap_or_else(|_| "[]".into());
         let res = sqlx::query(
             "INSERT INTO transactions \
              (account, signature, slot, block_time, fee, fee_payer, success, tx_type, programs, \
-              transfer_source, transfer_destination, transfer_lamports) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) \
+              transfer_source, transfer_destination, transfer_lamports, token_changes) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
              ON CONFLICT (account, signature) DO NOTHING",
         )
         .bind(account)
@@ -102,6 +104,7 @@ impl PgStore {
         .bind(src)
         .bind(dst)
         .bind(lamports)
+        .bind(token_changes)
         .execute(&self.pool)
         .await;
         if let Err(e) = res {
@@ -157,6 +160,9 @@ fn row_to_tx(row: &PgRow) -> TransactionData {
         }),
         _ => None,
     };
+    let token_changes: Vec<TokenChange> =
+        serde_json::from_str::<Vec<TokenChange>>(row.get::<String, _>("token_changes").as_str())
+            .unwrap_or_default();
     TransactionData {
         signature: row.get("signature"),
         slot: row.get::<i64, _>("slot") as u64,
@@ -167,6 +173,7 @@ fn row_to_tx(row: &PgRow) -> TransactionData {
         tx_type: row.get("tx_type"),
         programs: row.get("programs"),
         transfer,
+        token_changes,
     }
 }
 
@@ -210,6 +217,13 @@ mod tests {
                 destination: "DestPubkey".to_string(),
                 lamports: 250_000_000,
             }),
+            token_changes: vec![TokenChange {
+                mint: "MintPubkey".to_string(),
+                owner: "OwnerPubkey".to_string(),
+                change: "-1000000".to_string(),
+                decimals: 6,
+                ui_change: -1.0,
+            }],
         };
 
         // Insert twice — idempotent by (account, signature).

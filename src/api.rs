@@ -299,6 +299,7 @@ mod tests {
                 destination: "mock_receiver_1".to_string(),
                 lamports: 1000,
             }),
+            token_changes: vec![],
         };
 
         let transaction2 = TransactionData {
@@ -311,6 +312,7 @@ mod tests {
             tx_type: "vote".to_string(),
             programs: vec!["vote".to_string()],
             transfer: None,
+            token_changes: vec![],
         };
 
         // Add transactions to the in-memory database

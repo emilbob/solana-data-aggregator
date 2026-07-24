@@ -181,16 +181,23 @@ enriched record (not a transfer-biased guess):
   "success": true,
   "tx_type": "transfer",
   "programs": ["system"],
-  "transfer": { "source": "9xQe…", "destination": "3Fh2…", "lamports": 1000000 }
+  "transfer": { "source": "9xQe…", "destination": "3Fh2…", "lamports": 1000000 },
+  "token_changes": [
+    { "mint": "EPjF…", "owner": "9xQe…", "change": "-1000000", "decimals": 6, "ui_change": -1.0 }
+  ]
 }
 ```
 
 - `tx_type` classifies the transaction: `transfer` (native SOL), `vote`,
   `token` (SPL), the invoked program name, or `unknown`.
 - `transfer` is present **only** for native SOL transfers, and its `lamports`
-  is the *actual* amount parsed from the System Program instruction — non-transfer
-  transactions (votes, token ops, program calls) carry `null` here instead of a
-  meaningless number.
+  is the *actual* amount parsed from the System Program instruction — including
+  transfers made via **CPI/inner instructions** — not a balance-delta guess.
+  Non-transfer transactions carry `null` here.
+- `token_changes` lists net **SPL token** balance changes (mint, owner, signed
+  amount, decimals), derived from the transaction's pre/post token balances — so
+  it captures real token amounts regardless of how the transfer was structured
+  (including CPI). Empty when no token balances moved.
 
 ## Project Structure
 
@@ -284,7 +291,8 @@ proxy.
 
 ## Future Enhancements
 
-SPL token & inner-instruction decoding: extract token transfer amounts/mints and CPI details, not just native SOL transfers.
+Pair token balance changes into explicit transfers (source → destination per mint), and decode more instruction types (swaps, stakes) beyond native SOL and SPL token movements.
+Horizontal scale & backfill: shard accounts across workers and backfill full history beyond the current-epoch window.
 
 ## Contributing
 
