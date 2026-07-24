@@ -7,14 +7,66 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-/// Represents a transaction on the Solana blockchain.
+/// A decoded native-SOL transfer extracted from a transaction's parsed System
+/// Program instruction. `None` on records whose transaction isn't a simple SOL
+/// transfer (votes, token ops, program calls, …) — so `lamports` is the real
+/// transferred amount, not a balance-delta guess.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Transfer {
+    pub source: String,
+    pub destination: String,
+    pub lamports: u64,
+}
+
+/// A decoded Solana transaction, enriched with the fields the RPC response
+/// actually carries rather than a transfer-biased guess.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TransactionData {
-    pub signature: String, // Signature of the transaction
-    pub sender: String,    // Public key of the sender
-    pub receiver: String,  // Public key of the receiver
-    pub amount: u64,       // Amount transferred in the transaction
-    pub timestamp: u64,    // Timestamp of the transaction
+    pub signature: String,          // Transaction signature
+    pub slot: u64,                  // Slot the transaction landed in
+    pub timestamp: u64,             // Block time (unix seconds)
+    pub fee: u64,                   // Fee paid, in lamports
+    pub fee_payer: String,          // The account that paid the fee (first signer)
+    pub success: bool,              // Whether the transaction succeeded (meta.err is None)
+    pub tx_type: String, // Classified kind: "transfer" | "vote" | "token" | program | "unknown"
+    pub programs: Vec<String>, // Programs the transaction invoked
+    pub transfer: Option<Transfer>, // Present only when this is a native SOL transfer
+}
+
+impl TransactionData {
+    /// A compact, human-readable one-line summary for logging — so the terminal
+    /// narrates *what* was ingested, not just how many.
+    pub fn summary(&self) -> String {
+        let status = if self.success { "ok" } else { "FAIL" };
+        let mut s = format!(
+            "{:<8} {:<4} fee={:<6} payer={} slot={} sig={}",
+            self.tx_type,
+            status,
+            self.fee,
+            short(&self.fee_payer),
+            self.slot,
+            short(&self.signature),
+        );
+        if let Some(t) = &self.transfer {
+            s.push_str(&format!(
+                " {:.9} SOL {}→{}",
+                t.lamports as f64 / 1e9,
+                short(&t.source),
+                short(&t.destination),
+            ));
+        }
+        s
+    }
+}
+
+/// Truncates a base58 key/signature (ASCII) to a compact prefix for logging.
+fn short(s: &str) -> String {
+    let n = s.len().min(8);
+    if s.len() > n {
+        format!("{}…", &s[..n])
+    } else {
+        s.to_string()
+    }
 }
 
 /// On-disk persistence record. Persisting the index key alongside the
@@ -170,18 +222,49 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// Minimal sample record for tests that only care about storage/persistence.
+    pub(crate) fn sample_tx(signature: &str) -> TransactionData {
+        TransactionData {
+            signature: signature.to_string(),
+            slot: 100,
+            timestamp: 1628500000,
+            fee: 5000,
+            fee_payer: "payer".to_string(),
+            success: true,
+            tx_type: "transfer".to_string(),
+            programs: vec!["system".to_string()],
+            transfer: Some(Transfer {
+                source: "payer".to_string(),
+                destination: "dest".to_string(),
+                lamports: 100,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_summary_transfer_and_non_transfer() {
+        // Transfer record includes the SOL amount and source→destination.
+        let tx = sample_tx("abcdefghXXXXXXXX");
+        let s = tx.summary();
+        assert!(s.contains("transfer"), "{s}");
+        assert!(s.contains("SOL") && s.contains('→'), "{s}");
+        assert!(s.contains("sig=abcdefgh…"), "{s}");
+
+        // Non-transfer (e.g. vote) omits the SOL clause.
+        let mut vote = sample_tx("votesig0000");
+        vote.tx_type = "vote".to_string();
+        vote.transfer = None;
+        let vs = vote.summary();
+        assert!(vs.contains("vote"), "{vs}");
+        assert!(!vs.contains("SOL"), "{vs}");
+    }
+
     /// Test to verify that a transaction can be added to the database and retrieved.
     #[tokio::test]
     async fn test_add_and_get_transaction() {
         let db = Arc::new(InMemoryDatabase::new("test_transactions.txt".to_string()));
 
-        let transaction = TransactionData {
-            signature: "test_sig".to_string(),
-            sender: "sender1".to_string(),
-            receiver: "receiver1".to_string(),
-            amount: 100,
-            timestamp: 1628500000,
-        };
+        let transaction = sample_tx("test_sig");
 
         db.add_transaction("sender1", transaction.clone()).await;
 
@@ -198,13 +281,7 @@ mod tests {
         let path = "persistence_test_transactions.txt";
         std::fs::write(path, "").expect("Failed to clear file");
 
-        let transaction = TransactionData {
-            signature: "persist_test_sig".to_string(),
-            sender: "persist_sender".to_string(),
-            receiver: "persist_receiver".to_string(),
-            amount: 600,
-            timestamp: 1628500000,
-        };
+        let transaction = sample_tx("persist_test_sig");
 
         // First instance writes the transaction under the monitored-account key.
         let db1 = Arc::new(InMemoryDatabase::new(path.to_string()));
@@ -218,8 +295,9 @@ mod tests {
         let transactions = db2.get_transactions("monitored_account").await;
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
-        // Not re-keyed by sender:
-        assert!(db2.get_transactions("persist_sender").await.is_empty());
+        // Reloaded under the monitored-account key, not re-keyed by an inner
+        // field such as the fee payer:
+        assert!(db2.get_transactions("payer").await.is_empty());
     }
 
     /// Re-adding the same signature (per poll cycle / across restarts) must not
@@ -230,13 +308,7 @@ mod tests {
         std::fs::write(path, "").expect("Failed to clear file");
 
         let db = Arc::new(InMemoryDatabase::new(path.to_string()));
-        let transaction = TransactionData {
-            signature: "dup_sig".to_string(),
-            sender: "s".to_string(),
-            receiver: "r".to_string(),
-            amount: 1,
-            timestamp: 1628500000,
-        };
+        let transaction = sample_tx("dup_sig");
 
         db.add_transaction("acct", transaction.clone()).await;
         db.add_transaction("acct", transaction.clone()).await;

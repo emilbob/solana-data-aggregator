@@ -220,7 +220,7 @@ fn is_same_day(timestamp: u64, date: NaiveDate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{InMemoryDatabase, TransactionData};
+    use crate::db::{InMemoryDatabase, TransactionData, Transfer};
     use warp::test::request;
 
     /// Test to verify that the API correctly handles fetching transactions with mock data.
@@ -233,18 +233,30 @@ mod tests {
         // Mock some transaction data
         let transaction1 = TransactionData {
             signature: "mock_sig_1".to_string(),
-            sender: "mock_sender_1".to_string(),
-            receiver: "mock_receiver_1".to_string(),
-            amount: 1000,
+            slot: 10,
             timestamp: 1628500000,
+            fee: 5000,
+            fee_payer: "mock_sender_1".to_string(),
+            success: true,
+            tx_type: "transfer".to_string(),
+            programs: vec!["system".to_string()],
+            transfer: Some(Transfer {
+                source: "mock_sender_1".to_string(),
+                destination: "mock_receiver_1".to_string(),
+                lamports: 1000,
+            }),
         };
 
         let transaction2 = TransactionData {
             signature: "mock_sig_2".to_string(),
-            sender: "mock_sender_2".to_string(),
-            receiver: "mock_receiver_2".to_string(),
-            amount: 2000,
+            slot: 11,
             timestamp: 1628501000,
+            fee: 5000,
+            fee_payer: "mock_sender_2".to_string(),
+            success: true,
+            tx_type: "vote".to_string(),
+            programs: vec!["vote".to_string()],
+            transfer: None,
         };
 
         // Add transactions to the in-memory database
