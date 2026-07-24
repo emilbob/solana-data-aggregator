@@ -33,6 +33,42 @@ pub struct TransactionData {
     pub transfer: Option<Transfer>, // Present only when this is a native SOL transfer
 }
 
+impl TransactionData {
+    /// A compact, human-readable one-line summary for logging — so the terminal
+    /// narrates *what* was ingested, not just how many.
+    pub fn summary(&self) -> String {
+        let status = if self.success { "ok" } else { "FAIL" };
+        let mut s = format!(
+            "{:<8} {:<4} fee={:<6} payer={} slot={} sig={}",
+            self.tx_type,
+            status,
+            self.fee,
+            short(&self.fee_payer),
+            self.slot,
+            short(&self.signature),
+        );
+        if let Some(t) = &self.transfer {
+            s.push_str(&format!(
+                " {:.9} SOL {}→{}",
+                t.lamports as f64 / 1e9,
+                short(&t.source),
+                short(&t.destination),
+            ));
+        }
+        s
+    }
+}
+
+/// Truncates a base58 key/signature (ASCII) to a compact prefix for logging.
+fn short(s: &str) -> String {
+    let n = s.len().min(8);
+    if s.len() > n {
+        format!("{}…", &s[..n])
+    } else {
+        s.to_string()
+    }
+}
+
 /// On-disk persistence record. Persisting the index key alongside the
 /// transaction keeps the reloaded in-memory keying identical to the keying used
 /// at runtime (previously reload re-keyed by `sender`, diverging from the
@@ -203,6 +239,24 @@ mod tests {
                 lamports: 100,
             }),
         }
+    }
+
+    #[test]
+    fn test_summary_transfer_and_non_transfer() {
+        // Transfer record includes the SOL amount and source→destination.
+        let tx = sample_tx("abcdefghXXXXXXXX");
+        let s = tx.summary();
+        assert!(s.contains("transfer"), "{s}");
+        assert!(s.contains("SOL") && s.contains('→'), "{s}");
+        assert!(s.contains("sig=abcdefgh…"), "{s}");
+
+        // Non-transfer (e.g. vote) omits the SOL clause.
+        let mut vote = sample_tx("votesig0000");
+        vote.tx_type = "vote".to_string();
+        vote.transfer = None;
+        let vs = vote.summary();
+        assert!(vs.contains("vote"), "{vs}");
+        assert!(!vs.contains("SOL"), "{vs}");
     }
 
     /// Test to verify that a transaction can be added to the database and retrieved.

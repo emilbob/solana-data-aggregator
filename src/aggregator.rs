@@ -171,9 +171,11 @@ impl Aggregator {
                 .collect()
                 .await;
 
-            // Persist each decoded transaction (idempotent by signature).
+            // Persist each decoded transaction (idempotent by signature) and log
+            // a readable summary so the terminal narrates what was ingested.
             for tx in &transactions {
                 self.db.add_transaction(address, tx.clone()).await;
+                info!("ingested {}", tx.summary());
             }
 
             Ok::<(Vec<TransactionData>, Option<Signature>), AggregatorError>((transactions, newest))
