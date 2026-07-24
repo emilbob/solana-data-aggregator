@@ -28,9 +28,14 @@ services:
         condition: service_healthy
     ports:
       - "3030:3030"
+    # Configure these in a local .env (Compose reads it automatically). See
+    # .env.example. The account(s) to monitor are intentionally NOT defaulted —
+    # set SOLANA_PUBLIC_KEYS (or SOLANA_PUBLIC_KEY) in .env, or the app exits with
+    # a clear message.
     environment:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.testnet.solana.com}
-      SOLANA_PUBLIC_KEYS: ${SOLANA_PUBLIC_KEYS:-72sZAEEF7kyZ3kSaYbv8EzDQUFzJJpNC9Q2QZJxjQgbq}
+      SOLANA_PUBLIC_KEYS: ${SOLANA_PUBLIC_KEYS:-}
+      SOLANA_PUBLIC_KEY: ${SOLANA_PUBLIC_KEY:-}
       DATABASE_URL: postgres://solana:solana@postgres:5432/solana_aggregator
       FETCH_LIMIT: ${FETCH_LIMIT:-5}
       POLL_TIMEOUT_SECS: ${POLL_TIMEOUT_SECS:-30}

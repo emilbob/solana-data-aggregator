@@ -62,7 +62,8 @@ cd solana-data-aggregator
 
 ### Set Up Environment Variables
 
-Create a .env file in the root of the project directory:
+Create a `.env` file in the root of the project directory (copy `.env.example`
+as a starting point — `cp .env.example .env`):
 
 ```
 SOLANA_RPC_URL=https://api.testnet.solana.com
