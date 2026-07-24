@@ -105,7 +105,12 @@ impl InMemoryDatabase {
             .append(true)
             .open(&self.file_path)
             .await?;
-        file.write_all(line.as_bytes()).await
+        file.write_all(line.as_bytes()).await?;
+        // `tokio::fs::File` buffers internally and only flushes on drop
+        // (asynchronously, not awaited), so without this the write can be
+        // invisible to a subsequent read — i.e. `add_transaction` could return
+        // before the transaction is actually persisted.
+        file.flush().await
     }
 
     /// Loads transactions from the persistence file into the in-memory database.
@@ -238,7 +243,11 @@ mod tests {
         db.add_transaction("acct", transaction.clone()).await;
 
         assert_eq!(db.get_transactions("acct").await.len(), 1);
-        let line_count = std::fs::read_to_string(path).unwrap().lines().count();
-        assert_eq!(line_count, 1, "duplicate adds must not grow the file");
+        let content = std::fs::read_to_string(path).unwrap();
+        let line_count = content.lines().count();
+        assert_eq!(
+            line_count, 1,
+            "duplicate adds must not grow the file; got {line_count} lines: {content:?}"
+        );
     }
 }
