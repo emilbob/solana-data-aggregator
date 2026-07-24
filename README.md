@@ -77,6 +77,10 @@ FETCH_LIMIT=20
 POLL_TIMEOUT_SECS=10
 # Optional — use Postgres instead of the in-memory + file store
 # DATABASE_URL=postgres://solana:solana@localhost:5432/solana_aggregator
+# Optional — real-time ingestion via WebSocket (in addition to polling)
+# WEBSOCKET=true
+# Optional — override the WS endpoint (otherwise derived from SOLANA_RPC_URL)
+# SOLANA_WS_URL=wss://api.testnet.solana.com
 ```
 
 Replace YourPublicKeyHere with the public key you want to monitor.
@@ -97,6 +101,12 @@ Replace YourPublicKeyHere with the public key you want to monitor.
 - `DATABASE_URL` (optional) — when set, transactions are stored in **Postgres**
   (durable, indexed, queryable) instead of the in-memory + file store. See
   [Storage backends](#persistence) below.
+- `WEBSOCKET` (optional) — set to `true` to enable **real-time ingestion**: the
+  service subscribes to each account's transaction logs over WebSocket and
+  ingests transactions as they land, with auto-reconnect. Polling stays on as a
+  backfill safety net (ingestion is idempotent, so overlap is harmless).
+- `SOLANA_WS_URL` (optional) — the WebSocket endpoint. Defaults to `SOLANA_RPC_URL`
+  with `http(s)` rewritten to `ws(s)`. Setting it also enables WebSocket ingestion.
 
 ### Build the Project
 
@@ -237,9 +247,8 @@ Timeouts for Data Fetching: To prevent the application from hanging if the Solan
 
 ## Future Enhancements
 
-Real-time ingestion: subscribe to account activity over WebSocket/Geyser instead of polling, to eliminate gaps on high-volume accounts.
 SPL token & inner-instruction decoding: extract token transfer amounts/mints and CPI details, not just native SOL transfers.
-Dockerization: provide a Dockerfile to containerize the application for easier deployment.
+Deployment: a Dockerfile/image plus API auth, TLS, and metrics for running as a hosted service.
 
 ## Contributing
 

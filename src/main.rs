@@ -47,6 +47,17 @@ fn collect_accounts(single: Option<String>, multi: Option<String>) -> Vec<String
     out
 }
 
+/// Derives a WebSocket URL from an RPC URL (`https`→`wss`, `http`→`ws`).
+fn derive_ws_url(rpc_url: &str) -> String {
+    if let Some(rest) = rpc_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = rpc_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        rpc_url.to_string()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize the logger from environment variables, defaulting to "info" level
@@ -121,6 +132,26 @@ async fn main() {
         fetch_limit,
         poll_timeout_secs,
     ));
+
+    // Optional real-time ingestion: subscribe to each account's transaction logs
+    // over WebSocket, in addition to polling (which stays on as a backfill safety
+    // net). Enabled by WEBSOCKET=true or by setting SOLANA_WS_URL. The WS URL is
+    // derived from SOLANA_RPC_URL unless SOLANA_WS_URL is given.
+    let ws_enabled = env::var("SOLANA_WS_URL").is_ok()
+        || matches!(
+            env::var("WEBSOCKET").ok().as_deref(),
+            Some("true") | Some("1")
+        );
+    if ws_enabled {
+        let ws_url = env::var("SOLANA_WS_URL").unwrap_or_else(|_| derive_ws_url(&rpc_url));
+        info!("Real-time WebSocket ingestion enabled: {ws_url}");
+        for account in &pub_keys {
+            let agg = aggregator.clone();
+            let url = ws_url.clone();
+            let acct = account.clone();
+            tokio::spawn(async move { agg.subscribe_account(url, acct).await });
+        }
+    }
 
     // Refresh callback for /refresh endpoint — refreshes every monitored account.
     let aggregator_clone = aggregator.clone();
@@ -227,7 +258,21 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_accounts;
+    use super::{collect_accounts, derive_ws_url};
+
+    #[test]
+    fn derive_ws_url_maps_schemes() {
+        assert_eq!(
+            derive_ws_url("https://api.testnet.solana.com"),
+            "wss://api.testnet.solana.com"
+        );
+        assert_eq!(
+            derive_ws_url("http://localhost:8899"),
+            "ws://localhost:8899"
+        );
+        // Unknown scheme is passed through unchanged.
+        assert_eq!(derive_ws_url("wss://x.example"), "wss://x.example");
+    }
 
     #[test]
     fn collect_accounts_merges_dedups_and_trims() {
