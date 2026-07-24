@@ -91,8 +91,8 @@
     </div>
     <div class="field"><label for="limit">Limit</label><input id="limit" type="number" min="1" value="25" style="width:80px" /></div>
     <div class="field"><label for="offset">Offset</label><input id="offset" type="number" min="0" value="0" style="width:80px" /></div>
-    <div class="field"><label for="cluster">Explorer</label>
-      <select id="cluster"><option value="testnet">testnet</option><option value="devnet">devnet</option><option value="mainnet-beta">mainnet</option></select>
+    <div class="field"><label for="cluster">Explorer links</label>
+      <select id="cluster" title="Cluster for the Solana Explorer signature links. Does NOT change the data source — that's set by the server's RPC. Match it to your backend's network."><option value="testnet">testnet</option><option value="devnet">devnet</option><option value="mainnet-beta">mainnet</option></select>
     </div>
     <div class="field"><label>&nbsp;</label><button id="load" class="primary">Load</button></div>
     <div class="field"><label>&nbsp;</label><button id="refresh" class="ghost" title="Ask the backend to fetch new transactions from the chain">Refresh chain</button></div>
@@ -182,6 +182,8 @@ function render(txs, cluster) {
   $("s-transfer").textContent = sol(totalTransfer);
 }
 
+let lastTxs = [];  // last-loaded rows, so re-rendering (e.g. on cluster change) needs no refetch
+
 async function load() {
   const pk = $("pubkey").value.trim();
   if (!pk) { $("pubkey").focus(); return; }
@@ -192,6 +194,7 @@ async function load() {
   try {
     const r = await fetch(`/transactions?pub_key=${encodeURIComponent(pk)}&limit=${limit}&offset=${offset}`);
     const txs = await r.json();
+    lastTxs = Array.isArray(txs) ? txs : [];
     render(txs, cluster);
     loadBalance(pk);
   } catch (e) {
@@ -208,6 +211,9 @@ async function refreshChain() {
 $("load").addEventListener("click", load);
 $("refresh").addEventListener("click", refreshChain);
 $("pubkey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+// The cluster only controls where the Explorer links point — re-render the
+// current rows immediately so the links update without a reload.
+$("cluster").addEventListener("change", () => render(lastTxs, $("cluster").value));
 
 // Populate the monitored-account dropdown from the backend. The input is left
 // empty on purpose — pick a monitored account or paste one, then Load.
