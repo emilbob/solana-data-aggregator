@@ -47,6 +47,18 @@ fn collect_accounts(single: Option<String>, multi: Option<String>) -> Vec<String
     out
 }
 
+/// Resolves the address to bind. Cloud platforms (Render, Cloud Run, Heroku…)
+/// inject a `PORT` and expect the app to listen on `0.0.0.0:PORT`, which wins.
+/// Otherwise honor `SERVER_ADDR`, else default to `127.0.0.1:3030`.
+fn bind_addr(port: Option<String>, server_addr: Option<String>) -> SocketAddr {
+    if let Some(port) = port.and_then(|p| p.trim().parse::<u16>().ok()) {
+        return ([0, 0, 0, 0], port).into();
+    }
+    server_addr
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| ([127, 0, 0, 1], 3030).into())
+}
+
 /// Derives a WebSocket URL from an RPC URL (`https`→`wss`, `http`→`ws`).
 fn derive_ws_url(rpc_url: &str) -> String {
     if let Some(rest) = rpc_url.strip_prefix("https://") {
@@ -174,8 +186,7 @@ async fn main() {
     // Set up a one-shot channel for shutdown signaling
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Create the API and bind it to the configured address (SERVER_ADDR,
-    // default 127.0.0.1:3030).
+    // Create the API and bind it to the configured address.
     let api = create_api(
         db.clone(),
         rpc_url.clone(),
@@ -183,10 +194,7 @@ async fn main() {
         started,
         refresh_callback,
     );
-    let addr: SocketAddr = env::var("SERVER_ADDR")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| ([127, 0, 0, 1], 3030).into());
+    let addr = bind_addr(env::var("PORT").ok(), env::var("SERVER_ADDR").ok());
 
     // Start the Warp server with graceful shutdown wired to the oneshot: when
     // `shutdown_tx` fires, warp stops accepting connections and drains in-flight
@@ -262,7 +270,28 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_accounts, derive_ws_url};
+    use super::{bind_addr, collect_accounts, derive_ws_url};
+
+    #[test]
+    fn bind_addr_prefers_port_then_server_addr() {
+        // PORT (platform-injected) wins and binds all interfaces.
+        assert_eq!(
+            bind_addr(Some("10000".into()), Some("127.0.0.1:3030".into())).to_string(),
+            "0.0.0.0:10000"
+        );
+        // No PORT → honor SERVER_ADDR.
+        assert_eq!(
+            bind_addr(None, Some("127.0.0.1:9999".into())).to_string(),
+            "127.0.0.1:9999"
+        );
+        // Neither → default.
+        assert_eq!(bind_addr(None, None).to_string(), "127.0.0.1:3030");
+        // Junk PORT falls through.
+        assert_eq!(
+            bind_addr(Some("nope".into()), None).to_string(),
+            "127.0.0.1:3030"
+        );
+    }
 
     #[test]
     fn derive_ws_url_maps_schemes() {
