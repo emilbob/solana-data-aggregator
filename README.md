@@ -105,6 +105,12 @@ cargo run
 
 The application will start a server at `http://127.0.0.1:3030` and begin fetching transactions from the Solana blockchain.
 
+Open **`http://127.0.0.1:3030/`** in a browser for the built-in **web dashboard** — a
+single self-contained page (embedded in the binary, served by the same warp
+server) to query an account's transactions, view its balance, trigger a chain
+refresh, and browse the enriched records with type badges and explorer links. No
+Node, no build step, no separate server.
+
 ## Usage
 
 Once the application is running, you can interact with it using the provided API. The server will listen on `http://127.0.0.1:3030` by default.
@@ -115,6 +121,7 @@ You can query the transactions stored in the database using the API. Refer to th
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/` | Built-in web dashboard (self-contained HTML page). |
 | GET | `/health` | Liveness probe; returns `{"status":"ok"}`. |
 | GET | `/transactions` | Stored transactions for a public key (see query params below). |
 | GET | `/transactions/{signature}` | A single stored transaction by its signature. |
