@@ -2,9 +2,10 @@ use crate::db::{TransactionData, Transfer};
 use crate::store::Store;
 use futures::stream::StreamExt;
 use log::{info, warn};
+use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_client::rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::option_serializer::OptionSerializer;
@@ -173,7 +174,7 @@ impl Aggregator {
             // Fetch + decode the per-signature details concurrently (bounded), so
             // the cycle isn't a slow serial chain of RPC round-trips.
             let transactions: Vec<TransactionData> = futures::stream::iter(signatures)
-                .map(|sig_info| self.decode_signature(sig_info, epoch_start_time))
+                .map(|sig_info| self.decode_signature(sig_info.signature, epoch_start_time))
                 .buffer_unordered(FETCH_CONCURRENCY)
                 .filter_map(|decoded| async move { decoded })
                 .collect()
@@ -207,22 +208,55 @@ impl Aggregator {
         Ok(transactions)
     }
 
+    /// Subscribes to real-time transaction logs for `account` over WebSocket and
+    /// ingests each notified transaction as it lands. Reconnects with backoff if
+    /// the stream drops or the connection fails. Runs indefinitely — spawn one
+    /// per account. The poll loop still runs as a backfill safety net, and
+    /// storage is idempotent by signature, so any overlap is a harmless no-op.
+    pub async fn subscribe_account(self: Arc<Self>, ws_url: String, account: String) {
+        loop {
+            match PubsubClient::new(&ws_url).await {
+                Ok(client) => {
+                    // Real-time notifications are always current, so a single
+                    // epoch lookup up front avoids a per-message RPC call.
+                    let epoch_start_time = self.get_epoch_start_time().await.unwrap_or(0);
+                    let filter = RpcTransactionLogsFilter::Mentions(vec![account.clone()]);
+                    let config = RpcTransactionLogsConfig { commitment: None };
+                    match client.logs_subscribe(filter, config).await {
+                        Ok((mut stream, _unsubscribe)) => {
+                            info!("WebSocket subscribed for {account}");
+                            while let Some(resp) = stream.next().await {
+                                let sig = resp.value.signature;
+                                if let Some(tx) = self.decode_signature(sig, epoch_start_time).await
+                                {
+                                    self.db.add_transaction(&account, tx.clone()).await;
+                                    info!("ingested (ws) {}", tx.summary());
+                                }
+                            }
+                            warn!("WebSocket stream ended for {account}; reconnecting");
+                        }
+                        Err(e) => warn!("WebSocket subscribe failed for {account}: {e}"),
+                    }
+                }
+                Err(e) => warn!("WebSocket connect failed ({ws_url}): {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+
     /// Fetches and decodes a single transaction. Returns `None` (with a log)
     /// rather than aborting the whole cycle on a per-signature failure — a bad
     /// signature, an RPC hiccup, or a pre-epoch/unsupported transaction just
     /// gets skipped.
     async fn decode_signature(
         &self,
-        signature_info: RpcConfirmedTransactionStatusWithSignature,
+        sig_str: String,
         epoch_start_time: i64,
     ) -> Option<TransactionData> {
-        let signature: Signature = match signature_info.signature.parse() {
+        let signature: Signature = match sig_str.parse() {
             Ok(sig) => sig,
             Err(_) => {
-                warn!(
-                    "Skipping unparseable signature: {}",
-                    signature_info.signature
-                );
+                warn!("Skipping unparseable signature: {sig_str}");
                 return None;
             }
         };
@@ -291,7 +325,7 @@ impl Aggregator {
         let tx_type = classify(&transfer, &programs, token_balances_present(meta));
 
         Some(TransactionData {
-            signature: signature_info.signature,
+            signature: sig_str,
             slot,
             timestamp: block_time as u64,
             fee,
