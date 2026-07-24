@@ -16,5 +16,27 @@ services:
       timeout: 3s
       retries: 10
 
+  # The aggregator itself. Runs under the `app` profile so a plain
+  # `docker compose up -d` starts only Postgres (for local `cargo run`), while
+  # `docker compose --profile app up -d --build` runs the full stack.
+  app:
+    build: .
+    container_name: solana-aggregator-app
+    profiles: ["app"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3030:3030"
+    environment:
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.testnet.solana.com}
+      SOLANA_PUBLIC_KEYS: ${SOLANA_PUBLIC_KEYS:-72sZAEEF7kyZ3kSaYbv8EzDQUFzJJpNC9Q2QZJxjQgbq}
+      DATABASE_URL: postgres://solana:solana@postgres:5432/solana_aggregator
+      FETCH_LIMIT: ${FETCH_LIMIT:-5}
+      POLL_TIMEOUT_SECS: ${POLL_TIMEOUT_SECS:-30}
+      WEBSOCKET: ${WEBSOCKET:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    restart: unless-stopped
+
 volumes:
   pgdata:
