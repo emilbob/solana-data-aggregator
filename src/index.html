@@ -6,71 +6,92 @@
 <title>Solana Data Aggregator</title>
 <style>
   :root {
-    --bg: #0b0e14; --panel: #131822; --panel2: #1a2130; --border: #232c3d;
-    --text: #e6ebf2; --muted: #8a94a6; --accent: #9945ff; --accent2: #14f195;
-    --ok: #14f195; --fail: #ff5c72; --chip: #202838;
+    --bg: #0a0b10; --panel: rgba(255,255,255,.035); --panel2: rgba(255,255,255,.05);
+    --border: rgba(255,255,255,.08); --border2: rgba(255,255,255,.14);
+    --text: #eef1f6; --muted: #8b93a7;
+    --purple: #9945ff; --green: #14f195; --cyan: #19d3f5;
+    --accent: #9945ff; --accent2: #14f195; --ok: #14f195; --fail: #ff5c72;
+    --chip: rgba(255,255,255,.06);
+    --grad: linear-gradient(120deg, #9945ff 0%, #7d5cff 42%, #14f195 100%);
   }
   * { box-sizing: border-box; }
+  html, body { margin: 0; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(900px 520px at -6% -12%, rgba(153,69,255,.20), transparent 60%),
+      radial-gradient(880px 500px at 106% -4%, rgba(20,241,149,.13), transparent 55%);
+    background-attachment: fixed;
   }
   code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   header {
-    display: flex; align-items: center; gap: 12px; padding: 18px 24px;
+    display: flex; align-items: center; gap: 14px; padding: 18px 26px;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(90deg, rgba(153,69,255,.14), rgba(20,241,149,.10));
+    background: rgba(10,11,16,.55); backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 5;
   }
-  header h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
-  header .logo { width: 26px; height: 26px; border-radius: 7px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+  header .logo { width: 30px; height: 30px; border-radius: 9px; flex: none;
+    background: var(--grad); box-shadow: 0 0 20px rgba(153,69,255,.5); }
+  header h1 {
+    font-size: 19px; margin: 0; font-weight: 750; letter-spacing: -.3px;
+    background: linear-gradient(90deg, #ffffff, #dcc9ff 52%, #9bf6cf);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  header .sub { color: var(--muted); font-size: 12px; margin-top: 1px; }
   .health { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .dot.bad { background: var(--fail); box-shadow: 0 0 8px var(--fail); }
-  main { max-width: 1200px; margin: 0 auto; padding: 22px 24px 60px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); transition: .3s; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .dot.bad { background: var(--fail); box-shadow: 0 0 10px var(--fail); }
+  main { max-width: 1220px; margin: 0 auto; padding: 24px 26px 64px; }
   .controls {
-    display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 10px;
+    display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 12px;
     align-items: end; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; padding: 16px; margin-bottom: 18px;
+    border-radius: 16px; padding: 18px; margin-bottom: 20px; backdrop-filter: blur(8px);
   }
-  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .field label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; font-weight: 600; }
   input, select, button {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 9px 11px; font-size: 13px; outline: none;
+    background: rgba(255,255,255,.04); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; font-size: 13px; outline: none; transition: .15s;
   }
-  input:focus, select:focus { border-color: var(--accent); }
+  input:focus, select:focus { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(153,69,255,.22); }
   input.pubkey { font-family: ui-monospace, monospace; }
-  button { cursor: pointer; font-weight: 600; white-space: nowrap; transition: filter .15s, opacity .15s; }
-  button:hover { filter: brightness(1.15); }
+  button { cursor: pointer; font-weight: 650; white-space: nowrap; }
+  button:hover { filter: brightness(1.12); }
   button:disabled { opacity: .5; cursor: default; }
-  button.primary { background: linear-gradient(135deg, var(--accent), #7a2fff); border-color: transparent; }
-  button.ghost { background: var(--chip); }
-  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
-  .stat { flex: 1; min-width: 150px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; padding: 14px 16px; }
-  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-  .stat .v { font-size: 22px; font-weight: 650; margin-top: 4px; }
-  .stat .v.mono { font-size: 15px; }
-  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; min-width: 820px; }
-  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0; background: var(--panel); }
-  tbody tr:hover { background: rgba(255,255,255,.02); }
+  button.primary { background: var(--grad); border-color: transparent; color: #0a0b10; font-weight: 750;
+    box-shadow: 0 6px 18px rgba(153,69,255,.28); }
+  button.primary:hover { box-shadow: 0 8px 26px rgba(20,241,149,.32); }
+  button.ghost { background: var(--chip); border-color: var(--border2); }
+  .stats { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 20px; }
+  .stat { position: relative; flex: 1; min-width: 160px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; padding: 16px 18px; overflow: hidden; backdrop-filter: blur(8px); }
+  .stat::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--grad); opacity: .85; }
+  .stat .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; font-weight: 600; }
+  .stat .v { font-size: 24px; font-weight: 750; margin-top: 5px; letter-spacing: -.3px; }
+  .stat .v.mono { font-size: 16px; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow-x: auto; backdrop-filter: blur(8px); }
+  table { width: 100%; border-collapse: collapse; min-width: 860px; }
+  th, td { text-align: left; padding: 12px 15px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; font-weight: 600;
+    position: sticky; top: 0; background: rgba(14,16,23,.92); backdrop-filter: blur(4px); }
+  tbody tr { transition: background .12s; }
+  tbody tr:hover { background: rgba(153,69,255,.07); }
   tbody tr:last-child td { border-bottom: none; }
-  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: .4px; }
-  .badge.transfer { background: rgba(20,241,149,.16); color: var(--accent2); }
-  .badge.vote { background: rgba(120,140,170,.18); color: #9fb0c9; }
-  .badge.token { background: rgba(153,69,255,.20); color: #c9a3ff; }
-  .badge.other { background: rgba(255,180,60,.16); color: #ffc25e; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .5px; }
+  .badge.transfer { background: rgba(20,241,149,.14); color: var(--green); border: 1px solid rgba(20,241,149,.32); }
+  .badge.vote { background: rgba(130,150,180,.15); color: #a8b6cc; border: 1px solid rgba(130,150,180,.26); }
+  .badge.token { background: rgba(153,69,255,.18); color: #c9a3ff; border: 1px solid rgba(153,69,255,.36); }
+  .badge.other { background: rgba(255,180,60,.13); color: #ffc25e; border: 1px solid rgba(255,180,60,.28); }
   .status-ok { color: var(--ok); } .status-fail { color: var(--fail); font-weight: 700; }
   a.sig { color: #8ab4ff; text-decoration: none; }
-  a.sig:hover { text-decoration: underline; }
+  a.sig:hover { color: var(--cyan); text-decoration: underline; }
   .muted { color: var(--muted); }
-  .arrow { color: var(--accent2); }
-  .msg { padding: 40px; text-align: center; color: var(--muted); }
+  .arrow { color: var(--green); }
+  .msg { padding: 44px; text-align: center; color: var(--muted); }
   .msg.error { color: var(--fail); }
   .transfer-cell { font-family: ui-monospace, monospace; font-size: 12px; }
 </style>
@@ -78,7 +99,10 @@
 <body>
 <header>
   <div class="logo"></div>
-  <h1>Solana Data Aggregator</h1>
+  <div>
+    <h1>Solana Data Aggregator</h1>
+    <div class="sub">Real-time transaction indexer</div>
+  </div>
   <div class="health"><span id="health-dot" class="dot"></span><span id="health-text">checking…</span></div>
 </header>
 
