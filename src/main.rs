@@ -4,7 +4,7 @@ mod db;
 mod store;
 
 use aggregator::Aggregator;
-use api::create_api;
+use api::{create_api, NetworkApi};
 use dotenv::dotenv;
 use env_logger::Env;
 use log::{error, info};
@@ -70,6 +70,98 @@ fn derive_ws_url(rpc_url: &str) -> String {
     }
 }
 
+/// Infers a cluster name from an RPC URL (for legacy single-network config).
+fn network_name_from_url(url: &str) -> String {
+    let u = url.to_lowercase();
+    if u.contains("devnet") {
+        "devnet"
+    } else if u.contains("testnet") {
+        "testnet"
+    } else if u.contains("mainnet") {
+        "mainnet"
+    } else {
+        "custom"
+    }
+    .to_string()
+}
+
+fn truthy(key: &str) -> bool {
+    matches!(env::var(key).ok().as_deref(), Some("true") | Some("1"))
+}
+
+/// One monitored cluster: its name, RPC/WS endpoints, accounts, and whether to
+/// use real-time WebSocket ingestion.
+#[derive(Clone)]
+struct NetworkConfig {
+    name: String,
+    rpc_url: String,
+    ws_url: Option<String>,
+    websocket: bool,
+    accounts: Vec<String>,
+}
+
+/// Loads the networks to monitor. Multi-network mode is driven by `NETWORKS`
+/// (comma-separated names); for each `<NAME>` it reads `<NAME>_RPC_URL`,
+/// `<NAME>_PUBLIC_KEYS`/`<NAME>_PUBLIC_KEY`, and optional `<NAME>_WS_URL` /
+/// `<NAME>_WEBSOCKET`. Without `NETWORKS`, it falls back to the single-network
+/// `SOLANA_*` vars (name inferred from the RPC URL) — fully backward compatible.
+fn load_networks() -> Vec<NetworkConfig> {
+    if let Ok(list) = env::var("NETWORKS") {
+        return list
+            .split(',')
+            .filter_map(|name| {
+                let name = name.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let p = name.to_uppercase().replace('-', "_");
+                let rpc_url = env::var(format!("{p}_RPC_URL"))
+                    .ok()
+                    .filter(|s| !s.is_empty())?;
+                let accounts = collect_accounts(
+                    env::var(format!("{p}_PUBLIC_KEY")).ok(),
+                    env::var(format!("{p}_PUBLIC_KEYS")).ok(),
+                );
+                if accounts.is_empty() {
+                    eprintln!("warning: network '{name}' has no accounts set — skipping");
+                    return None;
+                }
+                let ws_url = env::var(format!("{p}_WS_URL"))
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let websocket = ws_url.is_some() || truthy(&format!("{p}_WEBSOCKET"));
+                Some(NetworkConfig {
+                    name: name.to_string(),
+                    rpc_url,
+                    ws_url,
+                    websocket,
+                    accounts,
+                })
+            })
+            .collect();
+    }
+
+    // Legacy single-network mode.
+    let rpc_url = require_env("SOLANA_RPC_URL");
+    let accounts = collect_accounts(
+        env::var("SOLANA_PUBLIC_KEY").ok(),
+        env::var("SOLANA_PUBLIC_KEYS").ok(),
+    );
+    if accounts.is_empty() {
+        eprintln!("error: set SOLANA_PUBLIC_KEY or SOLANA_PUBLIC_KEYS (see README / .env)");
+        std::process::exit(1);
+    }
+    let ws_url = env::var("SOLANA_WS_URL").ok().filter(|s| !s.is_empty());
+    let websocket = ws_url.is_some() || truthy("WEBSOCKET");
+    vec![NetworkConfig {
+        name: network_name_from_url(&rpc_url),
+        rpc_url,
+        ws_url,
+        websocket,
+        accounts,
+    }]
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize the logger from environment variables, defaulting to "info" level
@@ -81,23 +173,20 @@ async fn main() {
     // Process start, for the uptime metric.
     let started = std::time::Instant::now();
 
-    // Retrieve the RPC URL from the environment.
-    let rpc_url = require_env("SOLANA_RPC_URL");
-
-    // Monitored accounts: SOLANA_PUBLIC_KEYS (comma-separated) and/or the single
-    // SOLANA_PUBLIC_KEY. At least one is required.
-    let pub_keys = collect_accounts(
-        env::var("SOLANA_PUBLIC_KEY").ok(),
-        env::var("SOLANA_PUBLIC_KEYS").ok(),
-    );
-    if pub_keys.is_empty() {
-        eprintln!("error: set SOLANA_PUBLIC_KEY or SOLANA_PUBLIC_KEYS (see README / .env)");
+    // Networks to monitor (one or many). See `load_networks`.
+    let networks = load_networks();
+    if networks.is_empty() {
+        eprintln!("error: no networks configured (set NETWORKS + <NAME>_RPC_URL/_PUBLIC_KEYS, or SOLANA_RPC_URL + SOLANA_PUBLIC_KEYS)");
         std::process::exit(1);
     }
     info!(
-        "Monitoring {} account(s): {}",
-        pub_keys.len(),
-        pub_keys.join(", ")
+        "Monitoring {} network(s): {}",
+        networks.len(),
+        networks
+            .iter()
+            .map(|n| format!("{} ({} account(s))", n.name, n.accounts.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Max signatures to pull per fetch cycle (optional; default 20). Keeping this
@@ -138,45 +227,55 @@ async fn main() {
     // Load any persisted data (no-op for Postgres — already durable).
     db.load().await;
 
-    // Initialize the aggregator with the RPC URL and the database reference. It
-    // uses interior mutability for its cursor, so no outer Mutex is needed — the
-    // poll loop and an on-demand /refresh can run concurrently.
-    let aggregator = Arc::new(Aggregator::new(
-        &rpc_url,
-        db.clone(),
-        fetch_limit,
-        poll_timeout_secs,
-    ));
+    // One Aggregator per network, each with its own RPC client + per-account
+    // cursors. Interior mutability means no outer Mutex — poll, /refresh, and WS
+    // run concurrently.
+    let aggregators: Vec<(NetworkConfig, Arc<Aggregator>)> = networks
+        .iter()
+        .map(|net| {
+            let agg = Arc::new(Aggregator::new(
+                &net.name,
+                &net.rpc_url,
+                db.clone(),
+                fetch_limit,
+                poll_timeout_secs,
+            ));
+            (net.clone(), agg)
+        })
+        .collect();
 
-    // Optional real-time ingestion: subscribe to each account's transaction logs
-    // over WebSocket, in addition to polling (which stays on as a backfill safety
-    // net). Enabled by WEBSOCKET=true or by setting SOLANA_WS_URL. The WS URL is
-    // derived from SOLANA_RPC_URL unless SOLANA_WS_URL is given.
-    let ws_enabled = env::var("SOLANA_WS_URL").is_ok()
-        || matches!(
-            env::var("WEBSOCKET").ok().as_deref(),
-            Some("true") | Some("1")
-        );
-    if ws_enabled {
-        let ws_url = env::var("SOLANA_WS_URL").unwrap_or_else(|_| derive_ws_url(&rpc_url));
-        info!("Real-time WebSocket ingestion enabled: {ws_url}");
-        for account in &pub_keys {
-            let agg = aggregator.clone();
-            let url = ws_url.clone();
-            let acct = account.clone();
-            tokio::spawn(async move { agg.subscribe_account(url, acct).await });
+    // Real-time WebSocket ingestion per network (where enabled), alongside polling.
+    for (net, agg) in &aggregators {
+        if net.websocket {
+            let ws_url = net
+                .ws_url
+                .clone()
+                .unwrap_or_else(|| derive_ws_url(&net.rpc_url));
+            info!(
+                "Real-time WebSocket ingestion enabled for {}: {ws_url}",
+                net.name
+            );
+            for account in &net.accounts {
+                let agg = agg.clone();
+                let url = ws_url.clone();
+                let acct = account.clone();
+                tokio::spawn(async move { agg.subscribe_account(url, acct).await });
+            }
         }
     }
 
-    // Refresh callback for /refresh endpoint — refreshes every monitored account.
-    let aggregator_clone = aggregator.clone();
-    let refresh_keys = pub_keys.clone();
+    // Refresh callback for /refresh — refreshes every account on every network.
+    let refresh_set: Vec<(Arc<Aggregator>, Vec<String>)> = aggregators
+        .iter()
+        .map(|(net, agg)| (agg.clone(), net.accounts.clone()))
+        .collect();
     let refresh_callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        let aggregator = aggregator_clone.clone();
-        let keys = refresh_keys.clone();
+        let set = refresh_set.clone();
         tokio::spawn(async move {
-            for key in &keys {
-                let _ = aggregator.fetch_recent_transactions(key).await;
+            for (agg, accounts) in &set {
+                for acct in accounts {
+                    let _ = agg.fetch_recent_transactions(acct).await;
+                }
             }
         });
     });
@@ -186,14 +285,19 @@ async fn main() {
     // Set up a one-shot channel for shutdown signaling
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+    // Network info for the API: name + rpc_url + accounts. `rpc_url` is used
+    // server-side (balance endpoint) and is never returned to clients.
+    let api_networks: Vec<NetworkApi> = networks
+        .iter()
+        .map(|n| NetworkApi {
+            name: n.name.clone(),
+            rpc_url: n.rpc_url.clone(),
+            accounts: n.accounts.clone(),
+        })
+        .collect();
+
     // Create the API and bind it to the configured address.
-    let api = create_api(
-        db.clone(),
-        rpc_url.clone(),
-        pub_keys.clone(),
-        started,
-        refresh_callback,
-    );
+    let api = create_api(db.clone(), api_networks, started, refresh_callback);
     let addr = bind_addr(env::var("PORT").ok(), env::var("SERVER_ADDR").ok());
 
     // Start the Warp server with graceful shutdown wired to the oneshot: when
@@ -211,20 +315,25 @@ async fn main() {
     });
     info!("API listening on http://{}", addr);
 
-    // Task to periodically fetch recent transactions for every monitored account.
-    let poll_keys = pub_keys.clone();
+    // Poll every account on every network as a backfill safety net.
+    let poll_set: Vec<(Arc<Aggregator>, Vec<String>)> = aggregators
+        .iter()
+        .map(|(net, agg)| (agg.clone(), net.accounts.clone()))
+        .collect();
     let fetch_task = tokio::spawn(async move {
         loop {
-            for key in &poll_keys {
-                match aggregator.fetch_recent_transactions(key).await {
-                    Ok(transactions) => {
-                        info!(
-                            "Fetched {} new transactions for {}",
-                            transactions.len(),
-                            key
-                        )
+            for (agg, accounts) in &poll_set {
+                for key in accounts {
+                    match agg.fetch_recent_transactions(key).await {
+                        Ok(transactions) => {
+                            info!(
+                                "Fetched {} new transactions for {}",
+                                transactions.len(),
+                                key
+                            )
+                        }
+                        Err(err) => error!("Error fetching transactions for {}: {:?}", key, err),
                     }
-                    Err(err) => error!("Error fetching transactions for {}: {:?}", key, err),
                 }
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -270,7 +379,24 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_addr, collect_accounts, derive_ws_url};
+    use super::{bind_addr, collect_accounts, derive_ws_url, network_name_from_url};
+
+    #[test]
+    fn network_name_inferred_from_rpc_url() {
+        assert_eq!(
+            network_name_from_url("https://api.testnet.solana.com"),
+            "testnet"
+        );
+        assert_eq!(
+            network_name_from_url("https://api.devnet.solana.com"),
+            "devnet"
+        );
+        assert_eq!(
+            network_name_from_url("https://mainnet.helius-rpc.com/?api-key=x"),
+            "mainnet"
+        );
+        assert_eq!(network_name_from_url("http://localhost:8899"), "custom");
+    }
 
     #[test]
     fn bind_addr_prefers_port_then_server_addr() {

@@ -31,17 +31,17 @@ impl Store {
         Ok(Store::Postgres(PgStore { pool }))
     }
 
-    pub async fn add_transaction(&self, account: &str, tx: TransactionData) {
+    pub async fn add_transaction(&self, network: &str, account: &str, tx: TransactionData) {
         match self {
-            Store::Memory(m) => m.add_transaction(account, tx).await,
-            Store::Postgres(p) => p.add_transaction(account, tx).await,
+            Store::Memory(m) => m.add_transaction(network, account, tx).await,
+            Store::Postgres(p) => p.add_transaction(network, account, tx).await,
         }
     }
 
-    pub async fn get_transactions(&self, account: &str) -> Vec<TransactionData> {
+    pub async fn get_transactions(&self, network: &str, account: &str) -> Vec<TransactionData> {
         match self {
-            Store::Memory(m) => m.get_transactions(account).await,
-            Store::Postgres(p) => p.get_transactions(account).await,
+            Store::Memory(m) => m.get_transactions(network, account).await,
+            Store::Postgres(p) => p.get_transactions(network, account).await,
         }
     }
 
@@ -74,7 +74,7 @@ pub struct PgStore {
 }
 
 impl PgStore {
-    async fn add_transaction(&self, account: &str, tx: TransactionData) {
+    async fn add_transaction(&self, network: &str, account: &str, tx: TransactionData) {
         let (src, dst, lamports) = match &tx.transfer {
             Some(t) => (
                 Some(t.source.clone()),
@@ -87,11 +87,12 @@ impl PgStore {
             serde_json::to_string(&tx.token_changes).unwrap_or_else(|_| "[]".into());
         let res = sqlx::query(
             "INSERT INTO transactions \
-             (account, signature, slot, block_time, fee, fee_payer, success, tx_type, programs, \
-              transfer_source, transfer_destination, transfer_lamports, token_changes) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
-             ON CONFLICT (account, signature) DO NOTHING",
+             (network, account, signature, slot, block_time, fee, fee_payer, success, tx_type, \
+              programs, transfer_source, transfer_destination, transfer_lamports, token_changes) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+             ON CONFLICT (network, account, signature) DO NOTHING",
         )
+        .bind(network)
         .bind(account)
         .bind(&tx.signature)
         .bind(tx.slot as i64)
@@ -115,15 +116,18 @@ impl PgStore {
         }
     }
 
-    async fn get_transactions(&self, account: &str) -> Vec<TransactionData> {
-        match sqlx::query("SELECT * FROM transactions WHERE account = $1 ORDER BY slot DESC")
-            .bind(account)
-            .fetch_all(&self.pool)
-            .await
+    async fn get_transactions(&self, network: &str, account: &str) -> Vec<TransactionData> {
+        match sqlx::query(
+            "SELECT * FROM transactions WHERE network = $1 AND account = $2 ORDER BY slot DESC",
+        )
+        .bind(network)
+        .bind(account)
+        .fetch_all(&self.pool)
+        .await
         {
             Ok(rows) => rows.iter().map(row_to_tx).collect(),
             Err(e) => {
-                warn!("Postgres query for {account} failed: {e}");
+                warn!("Postgres query for {network}/{account} failed: {e}");
                 Vec::new()
             }
         }
@@ -226,13 +230,15 @@ mod tests {
             }],
         };
 
-        // Insert twice — idempotent by (account, signature).
-        store.add_transaction(&account, tx.clone()).await;
-        store.add_transaction(&account, tx.clone()).await;
+        // Insert twice — idempotent by (network, account, signature).
+        store.add_transaction("mainnet", &account, tx.clone()).await;
+        store.add_transaction("mainnet", &account, tx.clone()).await;
 
-        let rows = store.get_transactions(&account).await;
+        let rows = store.get_transactions("mainnet", &account).await;
         assert_eq!(rows.len(), 1, "duplicate insert must be a no-op");
         assert_eq!(rows[0], tx, "all fields (incl. transfer) must round-trip");
+        // Same account on another network is a separate bucket.
+        assert!(store.get_transactions("devnet", &account).await.is_empty());
 
         // Lookup by signature works too.
         let by_sig = store.get_transaction_by_signature(&tx.signature).await;

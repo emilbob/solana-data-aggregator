@@ -91,14 +91,22 @@ fn short(s: &str) -> String {
 /// monitored-address key used by `add_transaction`).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PersistedTx {
+    #[serde(default = "default_network")]
+    network: String,
     key: String,
     tx: TransactionData,
 }
 
-/// An in-memory database that stores transaction data, with persistence capabilities.
+fn default_network() -> String {
+    "mainnet".to_string()
+}
+
+/// An in-memory database that stores transaction data, with persistence
+/// capabilities. Keyed by `(network, account)` so the same account can be
+/// tracked on multiple clusters independently.
 #[derive(Debug, Default)]
 pub struct InMemoryDatabase {
-    transactions: Mutex<HashMap<String, Vec<TransactionData>>>, // Stores transactions by public key
+    transactions: Mutex<HashMap<(String, String), Vec<TransactionData>>>,
     file_path: String, // File path for persisting transactions
 }
 
@@ -139,18 +147,26 @@ impl InMemoryDatabase {
     ///
     /// # Arguments
     ///
+    /// * `network` - The cluster this account is monitored on (e.g. "mainnet").
     /// * `pub_key` - The public key this transaction is indexed under (the monitored account).
     /// * `transaction` - The transaction data to be added.
-    pub async fn add_transaction(&self, pub_key: &str, transaction: TransactionData) {
+    pub async fn add_transaction(
+        &self,
+        network: &str,
+        pub_key: &str,
+        transaction: TransactionData,
+    ) {
         let mut transactions = self.transactions.lock().await;
-        let entry = transactions.entry(pub_key.to_string()).or_default();
+        let entry = transactions
+            .entry((network.to_string(), pub_key.to_string()))
+            .or_default();
         if entry.iter().any(|t| t.signature == transaction.signature) {
             return; // already stored — skip both the in-memory push and the file append
         }
         entry.push(transaction.clone());
         drop(transactions); // release the lock before touching the filesystem
 
-        if let Err(e) = self.append_to_file(pub_key, &transaction).await {
+        if let Err(e) = self.append_to_file(network, pub_key, &transaction).await {
             warn!(
                 "Failed to persist transaction {}: {}",
                 transaction.signature, e
@@ -161,8 +177,14 @@ impl InMemoryDatabase {
     /// Appends a single record to the persistence file without blocking the
     /// async runtime. Returns any I/O or serialization error to the caller
     /// rather than panicking.
-    async fn append_to_file(&self, key: &str, tx: &TransactionData) -> std::io::Result<()> {
+    async fn append_to_file(
+        &self,
+        network: &str,
+        key: &str,
+        tx: &TransactionData,
+    ) -> std::io::Result<()> {
         let record = PersistedTx {
+            network: network.to_string(),
             key: key.to_string(),
             tx: tx.clone(),
         };
@@ -207,7 +229,9 @@ impl InMemoryDatabase {
             }
             match serde_json::from_str::<PersistedTx>(&line) {
                 Ok(record) => {
-                    let entry = transactions.entry(record.key).or_default();
+                    let entry = transactions
+                        .entry((record.network, record.key))
+                        .or_default();
                     if !entry.iter().any(|t| t.signature == record.tx.signature) {
                         entry.push(record.tx);
                     }
@@ -221,15 +245,19 @@ impl InMemoryDatabase {
     ///
     /// # Arguments
     ///
+    /// * `network` - The cluster to fetch transactions for.
     /// * `pub_key` - The public key to fetch transactions for.
     ///
     /// # Returns
     ///
-    /// A vector of `TransactionData` associated with the public key. Returns an empty
-    /// vector if no transactions are found.
-    pub async fn get_transactions(&self, pub_key: &str) -> Vec<TransactionData> {
+    /// A vector of `TransactionData` for `(network, pub_key)`. Returns an empty
+    /// vector if none are found.
+    pub async fn get_transactions(&self, network: &str, pub_key: &str) -> Vec<TransactionData> {
         let transactions = self.transactions.lock().await;
-        transactions.get(pub_key).cloned().unwrap_or_else(Vec::new)
+        transactions
+            .get(&(network.to_string(), pub_key.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Total number of stored transactions across all accounts.
@@ -289,11 +317,14 @@ mod tests {
 
         let transaction = sample_tx("test_sig");
 
-        db.add_transaction("sender1", transaction.clone()).await;
+        db.add_transaction("mainnet", "sender1", transaction.clone())
+            .await;
 
-        let transactions = db.get_transactions("sender1").await;
+        let transactions = db.get_transactions("mainnet", "sender1").await;
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
+        // Same account on a different network is a distinct bucket.
+        assert!(db.get_transactions("devnet", "sender1").await.is_empty());
     }
 
     /// Round-trips a transaction through the persistence file: a transaction
@@ -306,21 +337,24 @@ mod tests {
 
         let transaction = sample_tx("persist_test_sig");
 
-        // First instance writes the transaction under the monitored-account key.
+        // First instance writes the transaction under (network, account).
         let db1 = Arc::new(InMemoryDatabase::new(path.to_string()));
-        db1.add_transaction("monitored_account", transaction.clone())
+        db1.add_transaction("testnet", "monitored_account", transaction.clone())
             .await;
 
-        // A fresh instance loads it back under the same key.
+        // A fresh instance loads it back under the same (network, account) key.
         let db2 = Arc::new(InMemoryDatabase::new(path.to_string()));
         db2.load_from_file().await;
 
-        let transactions = db2.get_transactions("monitored_account").await;
+        let transactions = db2.get_transactions("testnet", "monitored_account").await;
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
-        // Reloaded under the monitored-account key, not re-keyed by an inner
-        // field such as the fee payer:
-        assert!(db2.get_transactions("payer").await.is_empty());
+        // Not re-keyed by an inner field (fee payer) or a different network:
+        assert!(db2.get_transactions("testnet", "payer").await.is_empty());
+        assert!(db2
+            .get_transactions("mainnet", "monitored_account")
+            .await
+            .is_empty());
     }
 
     /// Re-adding the same signature (per poll cycle / across restarts) must not
@@ -333,11 +367,14 @@ mod tests {
         let db = Arc::new(InMemoryDatabase::new(path.to_string()));
         let transaction = sample_tx("dup_sig");
 
-        db.add_transaction("acct", transaction.clone()).await;
-        db.add_transaction("acct", transaction.clone()).await;
-        db.add_transaction("acct", transaction.clone()).await;
+        db.add_transaction("mainnet", "acct", transaction.clone())
+            .await;
+        db.add_transaction("mainnet", "acct", transaction.clone())
+            .await;
+        db.add_transaction("mainnet", "acct", transaction.clone())
+            .await;
 
-        assert_eq!(db.get_transactions("acct").await.len(), 1);
+        assert_eq!(db.get_transactions("mainnet", "acct").await.len(), 1);
         let content = std::fs::read_to_string(path).unwrap();
         let line_count = content.lines().count();
         assert_eq!(

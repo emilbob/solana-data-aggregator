@@ -90,6 +90,14 @@ Replace YourPublicKeyHere with the public key you want to monitor.
   `SOLANA_PUBLIC_KEYS` (comma-separated) to watch several at once; the two are
   merged and de-duplicated, and at least one is required. Each account is polled
   independently (its own cursor) and stored/queried under its own key.
+- **Multiple networks** (optional) — set `NETWORKS` to a comma-separated list of
+  cluster names (e.g. `mainnet,devnet,testnet`); for each `<NAME>` provide
+  `<NAME>_RPC_URL` and `<NAME>_PUBLIC_KEYS` (plus optional `<NAME>_WS_URL` /
+  `<NAME>_WEBSOCKET`). The service then runs an indexer per network, stores data
+  by `(network, account)`, and the dashboard's **Network** dropdown switches the
+  live view. Data is queryable via `/transactions?network=<name>&pub_key=…` and
+  the monitored clusters are listed at `GET /networks`. Without `NETWORKS`, the
+  single-network `SOLANA_*` vars are used (cluster name inferred from the URL).
 - `SERVER_ADDR` (optional) — the address the HTTP API binds to.
 - `FETCH_LIMIT` (optional, default `20`) — how many recent signatures to pull
   each cycle. Each cycle fetches only transactions newer than the last one it
@@ -145,8 +153,9 @@ You can query the transactions stored in the database using the API. Refer to th
 |---|---|---|
 | GET | `/` | Built-in web dashboard (self-contained HTML page). |
 | GET | `/health` | Liveness probe; returns `{"status":"ok"}`. |
-| GET | `/metrics` | Prometheus metrics (stored txs, monitored accounts, uptime). |
-| GET | `/accounts` | JSON list of the monitored accounts. |
+| GET | `/metrics` | Prometheus metrics (stored txs, monitored accounts + networks, uptime). |
+| GET | `/networks` | JSON list of monitored clusters (name + accounts). |
+| GET | `/accounts` | Monitored accounts (optionally `?network=<name>`). |
 | GET | `/transactions` | Stored transactions for a public key (see query params below). |
 | GET | `/transactions/{signature}` | A single stored transaction by its signature. |
 | GET | `/accounts/{pub_key}/balance` | Current lamport balance for an account, fetched live from the RPC. |
