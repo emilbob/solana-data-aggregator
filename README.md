@@ -73,6 +73,8 @@ SERVER_ADDR=127.0.0.1:3030
 FETCH_LIMIT=20
 # Optional — per-cycle fetch budget in seconds (default 10)
 POLL_TIMEOUT_SECS=10
+# Optional — use Postgres instead of the in-memory + file store
+# DATABASE_URL=postgres://solana:solana@localhost:5432/solana_aggregator
 ```
 
 Replace YourPublicKeyHere with the public key you want to monitor.
@@ -86,6 +88,9 @@ Replace YourPublicKeyHere with the public key you want to monitor.
 - `POLL_TIMEOUT_SECS` (optional, default `10`) — per-cycle budget for the
   signature + detail fetches. Raise it if you must use a slow or rate-limited
   RPC and would rather wait than see `Elapsed`.
+- `DATABASE_URL` (optional) — when set, transactions are stored in **Postgres**
+  (durable, indexed, queryable) instead of the in-memory + file store. See
+  [Storage backends](#persistence) below.
 
 ### Build the Project
 
@@ -180,7 +185,29 @@ The project is organized into the following modules:
 
 ## Persistence
 
-The in-memory database stores transaction data during the application's runtime. To ensure data is not lost when the application restarts, the database is periodically saved to a text file (transactions.txt). This file is loaded into the database on startup, ensuring data continuity.
+The service supports two storage backends, selected at runtime:
+
+**In-memory + file (default).** Transactions are held in memory and appended to a
+text file (`transactions.txt`, JSONL, idempotent by signature), reloaded on
+startup. Zero setup — good for local use and small datasets.
+
+**Postgres (set `DATABASE_URL`).** Durable, indexed, and queryable — the
+production path. On startup the app runs the migrations in `migrations/` and
+stores each transaction in a `transactions` table keyed by `(account,
+signature)` (idempotent via `ON CONFLICT DO NOTHING`), with the native SOL
+transfer flattened into `transfer_source/destination/lamports` columns so it can
+be filtered and summed in SQL.
+
+A local Postgres is one command away via the included compose file:
+
+```
+docker compose up -d          # starts postgres:16 on :5432
+export DATABASE_URL=postgres://solana:solana@localhost:5432/solana_aggregator
+cargo run
+```
+
+The app logs `Using Postgres store` (vs `Using in-memory store`) at startup so
+you can confirm which backend is active.
 
 ## Testing
 

@@ -1,4 +1,5 @@
-use crate::db::{InMemoryDatabase, TransactionData, Transfer};
+use crate::db::{TransactionData, Transfer};
+use crate::store::Store;
 use futures::stream::StreamExt;
 use log::{info, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -41,12 +42,12 @@ pub enum AggregatorError {
 }
 
 /// Struct that handles fetching transactions from the Solana blockchain and storing
-/// them in an in-memory database.
+/// them via the configured storage backend.
 pub struct Aggregator {
-    client: RpcClient,         // Solana RPC client used to interact with the blockchain
-    db: Arc<InMemoryDatabase>, // In-memory database for storing transactions
-    fetch_limit: usize,        // Max signatures to pull per cycle (bounds the per-cycle work)
-    timeout: Duration,         // Per-cycle budget for the signature + detail fetches
+    client: RpcClient,  // Solana RPC client used to interact with the blockchain
+    db: Arc<Store>,     // Storage backend (in-memory or Postgres)
+    fetch_limit: usize, // Max signatures to pull per cycle (bounds the per-cycle work)
+    timeout: Duration,  // Per-cycle budget for the signature + detail fetches
     /// Newest signature ingested so far. Passed as `until` on the next cycle so
     /// each poll fetches only *new* transactions instead of re-scanning history.
     last_signature: Mutex<Option<Signature>>,
@@ -59,7 +60,7 @@ impl Aggregator {
     /// # Arguments
     ///
     /// * `url` - A string slice representing the URL of the Solana RPC endpoint.
-    /// * `db` - A thread-safe reference to an `InMemoryDatabase` instance.
+    /// * `db` - A thread-safe reference to the storage backend.
     /// * `fetch_limit` - Max number of signatures to request per cycle. Keeping
     ///   this bounded is what stops a busy account (which can return up to 1000
     ///   signatures) from blowing the per-cycle timeout.
@@ -69,12 +70,7 @@ impl Aggregator {
     /// # Returns
     ///
     /// A new instance of `Aggregator`.
-    pub fn new(
-        url: &str,
-        db: Arc<InMemoryDatabase>,
-        fetch_limit: usize,
-        timeout_secs: u64,
-    ) -> Self {
+    pub fn new(url: &str, db: Arc<Store>, fetch_limit: usize, timeout_secs: u64) -> Self {
         let client = RpcClient::new(url.to_string());
         Self {
             client,
