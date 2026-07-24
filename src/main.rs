@@ -44,6 +44,13 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(20);
 
+    // Per-cycle fetch budget in seconds (optional; default 10). Raise it to grind
+    // through a slow or rate-limited RPC.
+    let poll_timeout_secs: u64 = env::var("POLL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+
     // Initialize the in-memory database with a file path for persistence
     let db = Arc::new(InMemoryDatabase::new("transactions.txt".to_string()));
 
@@ -53,7 +60,12 @@ async fn main() {
     // Initialize the aggregator with the RPC URL and the database reference. It
     // uses interior mutability for its cursor, so no outer Mutex is needed — the
     // poll loop and an on-demand /refresh can run concurrently.
-    let aggregator = Arc::new(Aggregator::new(&rpc_url, db.clone(), fetch_limit));
+    let aggregator = Arc::new(Aggregator::new(
+        &rpc_url,
+        db.clone(),
+        fetch_limit,
+        poll_timeout_secs,
+    ));
 
     // Refresh callback for /refresh endpoint
     let aggregator_clone = aggregator.clone();

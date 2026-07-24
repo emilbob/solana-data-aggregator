@@ -71,6 +71,8 @@ SOLANA_PUBLIC_KEY=YourPublicKeyHere
 SERVER_ADDR=127.0.0.1:3030
 # Optional — max signatures pulled per fetch cycle (default 20)
 FETCH_LIMIT=20
+# Optional — per-cycle fetch budget in seconds (default 10)
+POLL_TIMEOUT_SECS=10
 ```
 
 Replace YourPublicKeyHere with the public key you want to monitor.
@@ -81,6 +83,9 @@ Replace YourPublicKeyHere with the public key you want to monitor.
   ingested and decodes them concurrently, so a small limit keeps a busy account
   from exceeding the per-cycle timeout. Very active accounts on a slow/public
   RPC still benefit from a dedicated RPC provider (e.g. Helius).
+- `POLL_TIMEOUT_SECS` (optional, default `10`) — per-cycle budget for the
+  signature + detail fetches. Raise it if you must use a slow or rate-limited
+  RPC and would rather wait than see `Elapsed`.
 
 ### Build the Project
 
