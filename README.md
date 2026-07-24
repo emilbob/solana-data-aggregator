@@ -133,6 +133,30 @@ Example:
 curl "http://127.0.0.1:3030/transactions?pub_key=YourPublicKeyHere"
 ```
 
+**Response shape** — each transaction is decoded from the RPC response into an
+enriched record (not a transfer-biased guess):
+
+```json
+{
+  "signature": "5dWj3A…",
+  "slot": 331457812,
+  "timestamp": 1721812345,
+  "fee": 5000,
+  "fee_payer": "9xQe…",
+  "success": true,
+  "tx_type": "transfer",
+  "programs": ["system"],
+  "transfer": { "source": "9xQe…", "destination": "3Fh2…", "lamports": 1000000 }
+}
+```
+
+- `tx_type` classifies the transaction: `transfer` (native SOL), `vote`,
+  `token` (SPL), the invoked program name, or `unknown`.
+- `transfer` is present **only** for native SOL transfers, and its `lamports`
+  is the *actual* amount parsed from the System Program instruction — non-transfer
+  transactions (votes, token ops, program calls) carry `null` here instead of a
+  meaningless number.
+
 ## Project Structure
 
 The project is organized into the following modules:

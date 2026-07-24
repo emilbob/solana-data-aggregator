@@ -1,4 +1,4 @@
-use crate::db::{InMemoryDatabase, TransactionData};
+use crate::db::{InMemoryDatabase, TransactionData, Transfer};
 use futures::stream::StreamExt;
 use log::{info, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -6,8 +6,10 @@ use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
-    EncodedTransaction, UiMessage, UiTransaction, UiTransactionEncoding,
+    EncodedTransaction, UiInstruction, UiMessage, UiParsedInstruction, UiTransaction,
+    UiTransactionEncoding, UiTransactionStatusMeta,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -225,102 +227,180 @@ impl Aggregator {
         }
 
         let meta = tx.transaction.meta.as_ref()?;
+        let success = meta.err.is_none();
+        let fee = meta.fee;
+        let slot = tx.slot;
+
         let EncodedTransaction::Json(transaction) = &tx.transaction.transaction else {
             return None;
         };
         let UiTransaction { message, .. } = transaction;
-        let (sender, receiver) = match message {
-            UiMessage::Parsed(parsed_message) => {
-                let sender = parsed_message
+
+        // Fee payer is the first account; programs invoked and any native SOL
+        // transfer come from the parsed instructions (we request JsonParsed).
+        let (fee_payer, programs, transfer) = match message {
+            UiMessage::Parsed(m) => {
+                let fee_payer = m
                     .account_keys
                     .first()
-                    .map_or("unknown".to_string(), |acc| acc.pubkey.clone());
-                let receiver = parsed_message
-                    .account_keys
-                    .get(1)
-                    .map_or("unknown".to_string(), |acc| acc.pubkey.clone());
-                (sender, receiver)
+                    .map_or_else(|| "unknown".to_string(), |a| a.pubkey.clone());
+                let mut programs: Vec<String> = Vec::new();
+                let mut transfer = None;
+                for ix in &m.instructions {
+                    match ix {
+                        UiInstruction::Parsed(UiParsedInstruction::Parsed(p)) => {
+                            if !programs.contains(&p.program) {
+                                programs.push(p.program.clone());
+                            }
+                            if transfer.is_none() {
+                                transfer = parse_sol_transfer(&p.program, &p.parsed);
+                            }
+                        }
+                        UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(pd)) => {
+                            if !programs.contains(&pd.program_id) {
+                                programs.push(pd.program_id.clone());
+                            }
+                        }
+                        UiInstruction::Compiled(_) => {}
+                    }
+                }
+                (fee_payer, programs, transfer)
             }
-            UiMessage::Raw(raw_message) => {
-                let sender = raw_message
+            UiMessage::Raw(m) => {
+                let fee_payer = m
                     .account_keys
                     .first()
-                    .map_or("unknown".to_string(), |key| key.clone());
-                let receiver = raw_message
-                    .account_keys
-                    .get(1)
-                    .map_or("unknown".to_string(), |key| key.clone());
-                (sender, receiver)
+                    .map_or_else(|| "unknown".to_string(), |k| k.clone());
+                (fee_payer, Vec::new(), None)
             }
         };
-        let amount = balance_delta(&meta.pre_balances, &meta.post_balances);
+
+        let tx_type = classify(&transfer, &programs, token_balances_present(meta));
 
         Some(TransactionData {
             signature: signature_info.signature,
-            sender,
-            receiver,
-            amount,
+            slot,
             timestamp: block_time as u64,
+            fee,
+            fee_payer,
+            success,
+            tx_type,
+            programs,
+            transfer,
         })
     }
 }
 
-/// Lamport magnitude moved for account index 1, computed without panicking.
-///
-/// The previous `post_balances[1] - pre_balances[1]` had two bugs: it indexed
-/// `[1]` unchecked (panics on transactions with fewer than two accounts), and
-/// the `u64` subtraction underflowed for the common case where the balance
-/// *decreases* (panic in debug, silent wrap in release). Using a signed
-/// difference and taking the absolute value yields the transferred magnitude
-/// for either direction; a missing index yields 0.
-fn balance_delta(pre_balances: &[u64], post_balances: &[u64]) -> u64 {
-    match (pre_balances.get(1), post_balances.get(1)) {
-        (Some(&pre), Some(&post)) => (post as i64 - pre as i64).unsigned_abs(),
-        _ => 0,
+/// Extracts a native SOL transfer from a parsed System Program instruction.
+/// Returns `None` for anything that isn't a `system` `transfer` — so the stored
+/// `lamports` is the actual transferred amount, not a balance-delta guess.
+fn parse_sol_transfer(program: &str, parsed: &serde_json::Value) -> Option<Transfer> {
+    if program != "system" || parsed.get("type")?.as_str()? != "transfer" {
+        return None;
+    }
+    let info = parsed.get("info")?;
+    Some(Transfer {
+        source: info.get("source")?.as_str()?.to_string(),
+        destination: info.get("destination")?.as_str()?.to_string(),
+        lamports: info.get("lamports")?.as_u64()?,
+    })
+}
+
+/// True if the transaction touched any SPL token balances.
+fn token_balances_present(meta: &UiTransactionStatusMeta) -> bool {
+    fn non_empty<T>(o: &OptionSerializer<Vec<T>>) -> bool {
+        matches!(o, OptionSerializer::Some(v) if !v.is_empty())
+    }
+    non_empty(&meta.pre_token_balances) || non_empty(&meta.post_token_balances)
+}
+
+/// Classifies a transaction: a real SOL transfer wins; then vote; then token;
+/// otherwise the first program it invoked, or "unknown".
+fn classify(transfer: &Option<Transfer>, programs: &[String], has_tokens: bool) -> String {
+    if transfer.is_some() {
+        "transfer".to_string()
+    } else if programs.iter().any(|p| p == "vote") {
+        "vote".to_string()
+    } else if has_tokens || programs.iter().any(|p| p == "spl-token") {
+        "token".to_string()
+    } else {
+        programs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::balance_delta;
-    use crate::db::{InMemoryDatabase, TransactionData};
+    use super::{classify, parse_sol_transfer};
+    use crate::db::{InMemoryDatabase, TransactionData, Transfer};
     use std::sync::Arc;
 
     #[test]
-    fn test_balance_delta_handles_decrease_and_missing_index() {
-        // Incoming: post > pre.
-        assert_eq!(balance_delta(&[10, 5], &[10, 12]), 7);
-        // Outgoing: post < pre — previously underflowed/panicked.
-        assert_eq!(balance_delta(&[10, 12], &[10, 5]), 7);
-        // Fewer than two accounts — previously indexed out of bounds.
-        assert_eq!(balance_delta(&[10], &[10]), 0);
-        assert_eq!(balance_delta(&[], &[]), 0);
+    fn test_parse_sol_transfer_extracts_real_amount() {
+        let parsed = serde_json::json!({
+            "type": "transfer",
+            "info": {"source": "AAA", "destination": "BBB", "lamports": 1234u64}
+        });
+        assert_eq!(
+            parse_sol_transfer("system", &parsed),
+            Some(Transfer {
+                source: "AAA".to_string(),
+                destination: "BBB".to_string(),
+                lamports: 1234,
+            })
+        );
+        // Not the System Program, or not a transfer → None.
+        assert!(parse_sol_transfer("vote", &parsed).is_none());
+        let create = serde_json::json!({"type": "createAccount", "info": {}});
+        assert!(parse_sol_transfer("system", &create).is_none());
+    }
+
+    #[test]
+    fn test_classify_priority() {
+        let transfer = Some(Transfer {
+            source: "a".to_string(),
+            destination: "b".to_string(),
+            lamports: 1,
+        });
+        assert_eq!(
+            classify(&transfer, &["system".to_string()], false),
+            "transfer"
+        );
+        assert_eq!(classify(&None, &["vote".to_string()], false), "vote");
+        assert_eq!(classify(&None, &["spl-token".to_string()], false), "token");
+        assert_eq!(classify(&None, &[], true), "token");
+        assert_eq!(classify(&None, &["custom".to_string()], false), "custom");
+        assert_eq!(classify(&None, &[], false), "unknown");
     }
 
     /// Test to verify that the `Aggregator` can add a transaction to the in-memory
     /// database and retrieve it correctly.
     #[tokio::test]
     async fn test_aggregator_add_and_fetch_transaction() {
-        // Initialize the in-memory database
         let db = Arc::new(InMemoryDatabase::new("test_transactions.txt".to_string()));
 
-        // Create a mock transaction
         let transaction = TransactionData {
             signature: "test_signature".to_string(),
-            sender: "sender1".to_string(),
-            receiver: "receiver1".to_string(),
-            amount: 100,
+            slot: 1,
             timestamp: 1628500000,
+            fee: 5000,
+            fee_payer: "sender1".to_string(),
+            success: true,
+            tx_type: "transfer".to_string(),
+            programs: vec!["system".to_string()],
+            transfer: Some(Transfer {
+                source: "sender1".to_string(),
+                destination: "receiver1".to_string(),
+                lamports: 100,
+            }),
         };
 
-        // Add the transaction to the database
         db.add_transaction("sender1", transaction.clone()).await;
 
-        // Fetch the transactions for the sender
         let transactions = db.get_transactions("sender1").await;
-
-        // Verify that the transaction is correctly stored and retrieved
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0], transaction);
     }
